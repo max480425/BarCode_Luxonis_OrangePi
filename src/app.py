@@ -32,6 +32,7 @@ def main() -> None:
 
     # Uruchomienie aplikacji Qt
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName("Luxonis OAK-1 Barcode Verifier")
     app.setOrganizationName("Luxonis Production Vision")
 

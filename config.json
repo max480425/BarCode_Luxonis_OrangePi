@@ -3,18 +3,18 @@
     "camera_type": "opencv",
     "camera_name": "Integrated Camera [USB #0]",
     "roi": [
-        0.215625,
-        0.48055555555555557,
-        0.784375,
-        1.0
+        0.1984375,
+        0.6055555555555555,
+        0.54375,
+        0.9944444444444445
     ],
-    "exposure_us": 10000,
+    "exposure_us": 10300,
     "iso": 100,
     "auto_exposure": false,
     "detection_interval_s": 2.0,
     "confirmation_threshold": 5,
     "auto_save_on_detection": false,
-    "auto_save_mode": "interval",
+    "auto_save_mode": "detection_only",
     "baseline_code": "5701598026926",
     "opc_ua_enabled": true,
     "opc_ua_port": 4840

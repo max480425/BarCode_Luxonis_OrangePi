@@ -5,8 +5,9 @@ import threading
 from typing import List, Optional, Tuple
 import numpy as np
 from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
@@ -20,10 +21,12 @@ from src.batch_manager import BatchManager
 from src.camera_stream import CameraDeviceInfo, CameraWorker, enumerate_cameras
 from src.gui.batch_panel import BatchPanel
 from src.gui.camera_controls import CameraControls
+from src.gui.system_monitor_dialog import ResourceMonitorWindow
 from src.gui.video_widget import VideoWidget
 from src.gui.zoom_widget import ZoomWidget
 from src.opc_server import OpcUaServerThread
 from src.storage_manager import StorageManager
+from src.system_monitor import SystemMonitor
 
 logger = logging.getLogger("main_window")
 
@@ -38,11 +41,20 @@ class MainWindow(QMainWindow):
 
     def __init__(self, storage_manager: StorageManager):
         super().__init__()
+        if QApplication.instance() is not None:
+            QApplication.setStyle("Fusion")
         self.storage_manager = storage_manager
         self.config = self.storage_manager.load_config()
 
         self.setWindowTitle("System Weryfikacji Kodów Kreskowych — Luxonis OAK / USB WebCam")
-        self.resize(1540, 940)
+        target_w, target_h = 1520, 920
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            target_w = min(1540, max(1160, avail.width() - 28))
+            target_h = min(940, max(720, avail.height() - 42))
+        self._initial_size = (target_w, target_h)
+        self.resize(target_w, target_h)
         self._apply_dark_theme()
 
         # Inicjalizacja modułów logicznych
@@ -64,6 +76,8 @@ class MainWindow(QMainWindow):
         self._latest_detection_result: Optional[DetectionResult] = None
         self._last_decode_ms: float = 0.0
         self._current_fps: float = 0.0
+        self._last_resolution_str: str = "-"
+        self._last_opc_status_str: str = "Inicjalizacja..."
         self._is_detecting: bool = False
         self._is_saving_auto: bool = False
         self._manual_zoom_norm: Optional[Tuple[float, float]] = None
@@ -71,12 +85,21 @@ class MainWindow(QMainWindow):
         self._auto_save_active: bool = bool(self.config.get("auto_save_on_detection", False))
         self._auto_save_mode: str = str(self.config.get("auto_save_mode", "interval"))
 
+        # Monitor zasobów systemowych (CPU, RAM, wątki)
+        self.system_monitor = SystemMonitor(watch_path=self.storage_manager.output_dir)
+        self.resource_monitor_window: Optional[ResourceMonitorWindow] = None
+
         # Utworzenie widżetów GUI
         self._init_ui()
 
         # Timer cyklicznej detekcji kodów
         self.detect_timer = QTimer(self)
         self.detect_timer.timeout.connect(self._on_detection_tick)
+
+        # Timer lekkiej telemetrii systemowej (CPU / RAM / wątki)
+        self.sys_mon_timer = QTimer(self)
+        self.sys_mon_timer.setInterval(1500)
+        self.sys_mon_timer.timeout.connect(self._on_sys_monitor_tick)
 
         # Inicjalizacja i uruchomienie wątku aktywnej kamery
         self.camera_worker: Optional[CameraWorker] = None
@@ -105,7 +128,11 @@ class MainWindow(QMainWindow):
             self.opc_server.update_camera(self._current_device_info.name)
             self._sync_opc_batch_state()
         else:
+            self._last_opc_status_str = "Wyłączony w konfiguracji"
             self.batch_panel.update_opc_status(False, "Wyłączony w konfiguracji")
+
+        self.sys_mon_timer.start()
+        self._on_sys_monitor_tick()
 
     def _resolve_initial_camera(self, saved_id: str, saved_name: str = "") -> CameraDeviceInfo:
         """Dobiera początkową kamerę na podstawie konfiguracji lub dostępności urządzeń."""
@@ -187,52 +214,104 @@ class MainWindow(QMainWindow):
         self.camera_worker.start()
 
     def _apply_dark_theme(self) -> None:
-        """Aplikuje profesjonalny ciemny motyw przemysłowy."""
+        """Aplikuje profesjonalny ciemny motyw przemysłowy o wysokim kontraście."""
+        app = QApplication.instance()
+        if app is not None:
+            pal = QPalette()
+            pal.setColor(QPalette.ColorRole.Window, QColor("#141414"))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor("#e6edf3"))
+            pal.setColor(QPalette.ColorRole.Base, QColor("#1c2026"))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#222730"))
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1f242c"))
+            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#e6edf3"))
+            pal.setColor(QPalette.ColorRole.Text, QColor("#e6edf3"))
+            pal.setColor(QPalette.ColorRole.Button, QColor("#252b34"))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#e6edf3"))
+            pal.setColor(QPalette.ColorRole.BrightText, QColor("#ffffff"))
+            pal.setColor(QPalette.ColorRole.Highlight, QColor("#0088cc"))
+            pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+            pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor("#6d7681"))
+            pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor("#6d7681"))
+            app.setPalette(pal)
+
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #141414;
-                color: #e0e0e0;
+                color: #e6edf3;
             }
             QWidget {
-                color: #e0e0e0;
+                color: #e6edf3;
                 font-family: 'Segoe UI', Arial, sans-serif;
             }
             QGroupBox {
-                border: 1px solid #333333;
+                border: 1px solid #353d49;
                 border-radius: 6px;
-                margin-top: 10px;
+                margin-top: 8px;
                 font-weight: bold;
                 font-size: 12px;
-                padding-top: 10px;
+                padding-top: 7px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 4px;
+                padding: 0 5px;
                 color: #00ddff;
             }
             QPushButton {
-                background-color: #262626;
-                border: 1px solid #404040;
+                background-color: #252b34;
+                border: 1px solid #455162;
                 border-radius: 4px;
-                padding: 5px 10px;
-                color: #f0f0f0;
+                padding: 4px 10px;
+                min-height: 24px;
+                color: #f0f4f8;
             }
             QPushButton:hover {
-                background-color: #333333;
+                background-color: #303946;
                 border-color: #00bbee;
             }
             QPushButton:pressed {
-                background-color: #1a1a1a;
+                background-color: #181d24;
+            }
+            QPushButton:disabled {
+                background-color: #1a1d22;
+                border-color: #2b3038;
+                color: #666e7a;
+            }
+            QRadioButton {
+                spacing: 7px;
+                color: #e8eef4;
+                font-size: 12px;
+                padding: 2px 0px;
+            }
+            QRadioButton::indicator {
+                width: 15px;
+                height: 15px;
+                border-radius: 9px;
+                border: 2px solid #8899aa;
+                background-color: #1b2028;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #00ddff;
+            }
+            QRadioButton::indicator:checked {
+                border: 2px solid #00ddff;
+                background-color: qradialgradient(
+                    cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+                    stop: 0 #00ddff, stop: 0.48 #00ddff,
+                    stop: 0.56 #1b2028, stop: 1 #1b2028
+                );
             }
             QSlider::groove:horizontal {
                 height: 6px;
-                background: #2b2b2b;
+                background: #2b313a;
                 border-radius: 3px;
             }
             QSlider::sub-page:horizontal {
                 background: #00aaee;
                 border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal:disabled {
+                background: #3b424c;
             }
             QSlider::handle:horizontal {
                 background: #ffffff;
@@ -242,12 +321,99 @@ class MainWindow(QMainWindow):
                 margin-bottom: -4px;
                 border-radius: 7px;
             }
+            QSlider::handle:horizontal:disabled {
+                background: #6b7280;
+                border-color: #374151;
+            }
             QSpinBox, QDoubleSpinBox, QComboBox {
-                background-color: #222222;
-                border: 1px solid #444444;
+                background-color: #1f242c;
+                border: 1px solid #455162;
                 border-radius: 4px;
-                padding: 3px;
+                padding: 2px 6px;
+                min-height: 24px;
                 color: #ffffff;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #3c4654;
+                border-bottom: 1px solid #3c4654;
+                background-color: #2a323d;
+                border-top-right-radius: 3px;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                border-left: 1px solid #3c4654;
+                background-color: #2a323d;
+                border-bottom-right-radius: 3px;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #364556;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e6edf3;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e6edf3;
+            }
+            QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {
+                border-bottom-color: #5a6370;
+            }
+            QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+                border-top-color: #5a6370;
+            }
+            QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {
+                border-color: #00aadd;
+            }
+            QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+                background-color: #171a20;
+                border-color: #2c323c;
+                color: #6d7681;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1f242c;
+                color: #f0f4f8;
+                border: 1px solid #0088aa;
+                selection-background-color: #0e4a66;
+                selection-color: #ffffff;
+            }
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: #16191e;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #38414e;
+                border-radius: 4px;
+                min-height: 24px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #0099cc;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QSplitter::handle {
+                background-color: #252b34;
+            }
+            QSplitter::handle:hover {
+                background-color: #00aadd;
             }
             QStatusBar {
                 background-color: #0d0d0d;
@@ -261,27 +427,34 @@ class MainWindow(QMainWindow):
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
 
-        # Lewy / Centralny kontener: Podgląd wideo + Zoom + Sterowanie kamerą
+        # Lewy / Centralny kontener: Podgląd wideo + (Zoom + Sterowanie kamerą) w pionowym QSplitter
         left_container = QWidget()
         left_layout = QVBoxLayout(left_container)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(0)
+
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.setChildrenCollapsible(False)
+        left_splitter.setHandleWidth(5)
 
         # Główny widżet wideo
         self.video_widget = VideoWidget()
+        self.video_widget.setMinimumSize(480, 250)
         rx1, ry1, rx2, ry2 = self.barcode_engine.roi_normalized
         self.video_widget.set_roi(rx1, ry1, rx2, ry2)
-        left_layout.addWidget(self.video_widget, stretch=3)
+        left_splitter.addWidget(self.video_widget)
 
         # Dolny pasek lewej sekcji: Zoom 1:1 + Wybór i parametry kamery
-        bottom_box = QHBoxLayout()
+        bottom_widget = QWidget()
+        bottom_box = QHBoxLayout(bottom_widget)
+        bottom_box.setContentsMargins(0, 4, 0, 0)
         bottom_box.setSpacing(8)
 
         self.zoom_widget = ZoomWidget()
-        bottom_box.addWidget(self.zoom_widget)
+        bottom_box.addWidget(self.zoom_widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.camera_controls = CameraControls(
             available_cameras=self.available_cameras,
@@ -293,7 +466,16 @@ class MainWindow(QMainWindow):
             initial_roi=self.barcode_engine.roi_normalized
         )
         bottom_box.addWidget(self.camera_controls, stretch=1)
-        left_layout.addLayout(bottom_box, stretch=1)
+        left_splitter.addWidget(bottom_widget)
+
+        target_w, target_h = self._initial_size
+        bottom_h = min(400, max(370, int(target_h * 0.46)))
+        video_h = max(250, target_h - bottom_h - 60)
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 2)
+        left_splitter.setSizes([video_h, bottom_h])
+
+        left_layout.addWidget(left_splitter)
 
         # Prawy panel: Partia, Live Log i Zrzuty
         self.batch_panel = BatchPanel(self.batch_manager)
@@ -301,10 +483,14 @@ class MainWindow(QMainWindow):
         self.batch_panel.set_autosave_mode(self._auto_save_mode)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(5)
         splitter.addWidget(left_container)
         splitter.addWidget(self.batch_panel)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
+        right_w = max(390, min(470, int(target_w * 0.30)))
+        splitter.setSizes([max(760, target_w - right_w - 24), right_w])
 
         main_layout.addWidget(splitter)
 
@@ -333,6 +519,8 @@ class MainWindow(QMainWindow):
         self.batch_panel.reset_baseline_requested.connect(self._on_reset_baseline)
         self.batch_panel.accept_baseline_requested.connect(self._on_accept_baseline)
         self.batch_panel.clear_alarm_requested.connect(self._on_clear_alarm)
+        self.batch_panel.clear_log_requested.connect(self._on_clear_log)
+        self.batch_panel.open_system_monitor_requested.connect(self._on_open_system_monitor)
         self.batch_panel.snapshot_requested.connect(self._on_manual_snapshot)
         self.batch_panel.auto_save_toggled.connect(self._on_auto_save_toggled)
         self.batch_panel.auto_save_mode_changed.connect(self._on_auto_save_mode_changed)
@@ -367,6 +555,7 @@ class MainWindow(QMainWindow):
     # =========================================================================
     @Slot(bool, str)
     def _on_opc_status_changed(self, running: bool, endpoint_or_err: str) -> None:
+        self._last_opc_status_str = f"Aktywny ({endpoint_or_err})" if running else endpoint_or_err
         self.batch_panel.update_opc_status(running, endpoint_or_err)
         if running:
             self.status_bar.showMessage(f"Serwer OPC UA aktywny dla Ignition ({endpoint_or_err})", 4000)
@@ -422,6 +611,7 @@ class MainWindow(QMainWindow):
         """Odbiór nowej klatki z kamery (wywoływany w głównym wątku GUI)."""
         self._latest_4k_frame = full_frame
         h, w = full_frame.shape[:2]
+        self._last_resolution_str = f"{w}×{h}"
         self.video_widget.set_full_resolution(w, h)
 
         focus_px, target_lbl = self._determine_zoom_focus_px(w, h)
@@ -667,6 +857,56 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Wyciszono alarm zmiany litografii.", 3000)
 
     @Slot()
+    def _on_clear_log(self) -> None:
+        """Natychmiastowe wyczyszczenie tabeli historii odczytów (Live Log)."""
+        self.batch_manager.clear_history()
+        self.batch_panel.update_batch_display()
+        self.status_bar.showMessage("Wyczyszczono historię Live Log.", 3000)
+
+    @Slot()
+    def _on_open_system_monitor(self) -> None:
+        """Otwiera lub przywołuje okno monitora zasobów systemowych (CPU, RAM, wątki)."""
+        if self.resource_monitor_window is None:
+            self.resource_monitor_window = ResourceMonitorWindow(parent=None)
+            self.resource_monitor_window.refresh_requested.connect(self._refresh_resource_monitor)
+        self.resource_monitor_window.show()
+        self.resource_monitor_window.raise_()
+        self.resource_monitor_window.activateWindow()
+        self._refresh_resource_monitor()
+
+    def _collect_app_telemetry(self) -> dict:
+        return {
+            "camera_name": self._current_device_info.name if self._current_device_info else "-",
+            "fps": self._current_fps,
+            "resolution": self._last_resolution_str,
+            "decode_ms": self._last_decode_ms,
+            "total_scans": self.batch_manager.stats.total_frames_analyzed,
+            "interval_s": self.camera_controls.interval_s,
+            "opc_status": self._last_opc_status_str,
+            "captures_count": self.storage_manager.get_total_files_in_dir(),
+        }
+
+    @Slot()
+    def _refresh_resource_monitor(self) -> None:
+        snap = self.system_monitor.collect(
+            extra_workers=[
+                ("CameraWorker", self.camera_worker),
+                ("OpcUaServerThread", self.opc_server),
+            ]
+        )
+        self.batch_panel.update_system_summary(
+            snap.cpu_system_percent,
+            snap.process_ram_mb,
+            snap.os_thread_count,
+        )
+        if self.resource_monitor_window is not None and self.resource_monitor_window.isVisible():
+            self.resource_monitor_window.update_metrics(snap, app_info=self._collect_app_telemetry())
+
+    @Slot()
+    def _on_sys_monitor_tick(self) -> None:
+        self._refresh_resource_monitor()
+
+    @Slot()
     def _on_manual_snapshot(self) -> None:
         """Natychmiastowe ręczne zapisanie zdjęcia i ROI na dysk."""
         if self._latest_4k_frame is None:
@@ -731,6 +971,9 @@ class MainWindow(QMainWindow):
         logger.info("Zamykanie aplikacji — zapisywanie konfiguracji...")
         self._save_current_config()
         self.detect_timer.stop()
+        self.sys_mon_timer.stop()
+        if self.resource_monitor_window is not None:
+            self.resource_monitor_window.close()
         if self.camera_worker:
             self.camera_worker.stop()
         if self.opc_server:

@@ -4,6 +4,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -21,12 +22,14 @@ from src.batch_manager import BatchManager
 
 class BatchPanel(QWidget):
     """
-    Panel boczny zarządzania partią produkcyjną, tabelą odczytów w czasie rzeczywistym
-    oraz narzędziami do zapisu zrzutów Snapshot i Trybu Zbierania Zdjęć.
+    Panel boczny zarządzania partią produkcyjną, tabelą odczytów w czasie rzeczywistym,
+    narzędziami zapisu Snapshot i Trybu Zbierania Zdjęć oraz skrótem do monitora zasobów.
     """
     reset_baseline_requested = Signal()
     accept_baseline_requested = Signal()
     clear_alarm_requested = Signal()
+    clear_log_requested = Signal()
+    open_system_monitor_requested = Signal()
     snapshot_requested = Signal()
     auto_save_toggled = Signal(bool)
     auto_save_mode_changed = Signal(str)  # 'interval' lub 'detection_only'
@@ -35,29 +38,57 @@ class BatchPanel(QWidget):
     def __init__(self, batch_manager: BatchManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.batch_manager = batch_manager
+        self.setMinimumWidth(360)
         self._init_ui()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(10)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(7)
 
         # ==========================================
-        # 1. KARTA STATUSU SPRZĘTU I SKANERA
+        # 1. KARTA STATUSU SPRZĘTU, SKANERA I ZASOBÓW
         # ==========================================
         hw_group = QGroupBox("Status Aktywnej Kamery i Skanera")
         hw_layout = QVBoxLayout(hw_group)
+        hw_layout.setContentsMargins(8, 8, 8, 6)
         hw_layout.setSpacing(4)
 
         self.lbl_hw_status = QLabel("● Połączenie: Oczekiwanie...")
+        self.lbl_hw_status.setWordWrap(True)
         self.lbl_hw_status.setStyleSheet("font-weight: bold; color: #ffaa00;")
+
         self.lbl_hw_details = QLabel("Model: - | Szczegóły: - | ID: -")
+        self.lbl_hw_details.setWordWrap(True)
         self.lbl_hw_details.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+
         self.lbl_perf = QLabel("Strumień: 0.0 FPS | Analiza: 0.0 ms")
         self.lbl_perf.setStyleSheet("color: #00ddff; font-weight: bold; font-size: 11px;")
+
         self.lbl_opc_status = QLabel("● OPC UA (Ignition): Inicjalizacja...")
+        self.lbl_opc_status.setWordWrap(True)
         self.lbl_opc_status.setStyleSheet("color: #ffaa00; font-size: 11px; font-weight: bold;")
+
+        sys_row = QHBoxLayout()
+        sys_row.setSpacing(6)
+        self.lbl_sys_perf = QLabel("CPU: -% | RAM: - MB | Wątki: -")
+        self.lbl_sys_perf.setStyleSheet("color: #9bb8d3; font-size: 11px; font-weight: bold;")
+        self.btn_system_monitor = QPushButton("📊 Monitor zasobów")
+        self.btn_system_monitor.setMinimumHeight(26)
+        self.btn_system_monitor.setToolTip(
+            "Otwiera okno z obciążeniem CPU, zajętością pamięci RAM, listą wątków i telemetrią"
+        )
+        self.btn_system_monitor.setStyleSheet(
+            "QPushButton { background-color: #1c2c3d; border: 1px solid #2b6cb0; color: #cce7ff; "
+            "font-weight: bold; font-size: 11px; padding: 3px 8px; }"
+            "QPushButton:hover { background-color: #24405c; border-color: #00ccff; color: #ffffff; }"
+        )
+        self.btn_system_monitor.clicked.connect(self.open_system_monitor_requested.emit)
+        sys_row.addWidget(self.lbl_sys_perf, stretch=1)
+        sys_row.addWidget(self.btn_system_monitor)
+
         self.lbl_scanner_live = QLabel("🔍 Skaner: Oczekiwanie na pierwszą klatkę...")
+        self.lbl_scanner_live.setWordWrap(True)
         self.lbl_scanner_live.setStyleSheet(
             "background-color: #1c2430; color: #00ffcc; font-weight: bold; font-size: 11px; "
             "padding: 4px 6px; border-radius: 4px; border: 1px solid #0088aa;"
@@ -67,6 +98,7 @@ class BatchPanel(QWidget):
         hw_layout.addWidget(self.lbl_hw_details)
         hw_layout.addWidget(self.lbl_perf)
         hw_layout.addWidget(self.lbl_opc_status)
+        hw_layout.addLayout(sys_row)
         hw_layout.addWidget(self.lbl_scanner_live)
         layout.addWidget(hw_group)
 
@@ -86,18 +118,27 @@ class BatchPanel(QWidget):
         alarm_layout = QVBoxLayout(self.alarm_box)
         self.lbl_alarm_title = QLabel("🚨 ZMIANA LITOGRAFII! 🚨")
         self.lbl_alarm_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_alarm_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        self.lbl_alarm_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
         self.lbl_alarm_desc = QLabel("Wykryto nową serię innego kodu na linii!")
+        self.lbl_alarm_desc.setWordWrap(True)
         self.lbl_alarm_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_alarm_desc.setStyleSheet("font-size: 12px; color: #ffdddd;")
 
         btn_alarm_layout = QHBoxLayout()
         self.btn_accept_new = QPushButton("✓ Ustaw jako nowy wzorzec")
-        self.btn_accept_new.setStyleSheet("background-color: #00aa44; color: white; font-weight: bold; padding: 4px;")
+        self.btn_accept_new.setMinimumHeight(28)
+        self.btn_accept_new.setStyleSheet(
+            "QPushButton { background-color: #009944; border: 1px solid #22dd66; color: white; font-weight: bold; padding: 4px 8px; }"
+            "QPushButton:hover { background-color: #00b852; }"
+        )
         self.btn_accept_new.clicked.connect(self.accept_baseline_requested.emit)
 
         self.btn_dismiss = QPushButton("✕ Wycisz alarm")
-        self.btn_dismiss.setStyleSheet("background-color: #444444; color: white; padding: 4px;")
+        self.btn_dismiss.setMinimumHeight(28)
+        self.btn_dismiss.setStyleSheet(
+            "QPushButton { background-color: #444444; border: 1px solid #777777; color: white; font-weight: bold; padding: 4px 8px; }"
+            "QPushButton:hover { background-color: #5a5a5a; }"
+        )
         self.btn_dismiss.clicked.connect(self.clear_alarm_requested.emit)
 
         btn_alarm_layout.addWidget(self.btn_accept_new)
@@ -114,6 +155,7 @@ class BatchPanel(QWidget):
         # ==========================================
         batch_group = QGroupBox("Aktualna Partia (Auto-Lock)")
         batch_layout = QVBoxLayout(batch_group)
+        batch_layout.setContentsMargins(8, 8, 8, 6)
         batch_layout.setSpacing(6)
 
         self.lbl_batch_code = QLabel("[ BRAK WZORCA — AUTO-LOCK AKTYWNY ]")
@@ -123,21 +165,28 @@ class BatchPanel(QWidget):
             color: #ffaa00;
             font-size: 13px;
             font-weight: bold;
-            padding: 8px;
+            padding: 7px;
             border-radius: 4px;
             border: 1px dashed #ffaa00;
         """)
         batch_layout.addWidget(self.lbl_batch_code)
 
         sub_batch_layout = QHBoxLayout()
+        sub_batch_layout.setSpacing(6)
         self.btn_reset_batch = QPushButton("🔄 Resetuj / Ucz nowy kod")
-        self.btn_reset_batch.setStyleSheet("background-color: #3a3a3a; padding: 5px;")
+        self.btn_reset_batch.setMinimumHeight(28)
+        self.btn_reset_batch.setStyleSheet(
+            "QPushButton { background-color: #323842; border: 1px solid #525d6e; color: #f0f4f8; font-weight: bold; padding: 4px 8px; }"
+            "QPushButton:hover { background-color: #3f4754; border-color: #00bbff; }"
+        )
         self.btn_reset_batch.clicked.connect(self.reset_baseline_requested.emit)
-        sub_batch_layout.addWidget(self.btn_reset_batch)
+        sub_batch_layout.addWidget(self.btn_reset_batch, stretch=1)
 
         sub_batch_layout.addWidget(QLabel("Próg (N):"))
         self.spin_threshold = QSpinBox()
         self.spin_threshold.setRange(1, 20)
+        self.spin_threshold.setMinimumWidth(62)
+        self.spin_threshold.setMinimumHeight(26)
         self.spin_threshold.setValue(self.batch_manager.confirmation_threshold)
         self.spin_threshold.valueChanged.connect(self.threshold_changed.emit)
         sub_batch_layout.addWidget(self.spin_threshold)
@@ -150,18 +199,21 @@ class BatchPanel(QWidget):
         # ==========================================
         snap_group = QGroupBox("Zapis Obrazów i Tryb Zbierania Zdjęć (Captures)")
         snap_layout = QVBoxLayout(snap_group)
+        snap_layout.setContentsMargins(8, 8, 8, 6)
         snap_layout.setSpacing(6)
 
-        # Przycisk pojedynczego ręcznego zrzutu
         self.btn_snapshot = QPushButton("📸 Zapisz Zdjęcie Teraz (Snapshot 4K + ROI)")
+        self.btn_snapshot.setMinimumHeight(30)
         self.btn_snapshot.setStyleSheet(
-            "background-color: #2b78e4; color: white; font-weight: bold; font-size: 12px; padding: 7px;"
+            "QPushButton { background-color: #2563eb; border: 1px solid #60a5fa; color: white; "
+            "font-weight: bold; font-size: 12px; padding: 5px 10px; }"
+            "QPushButton:hover { background-color: #1d4ed8; border-color: #93c5fd; }"
         )
         self.btn_snapshot.clicked.connect(self.snapshot_requested.emit)
         snap_layout.addWidget(self.btn_snapshot)
 
-        # Duży przycisk przełączający Tryb Zbierania Zdjęć (Auto-Zapis)
-        self.btn_autosave = QPushButton("⚪ TRYB ZBIERANIA ZDJĘĆ: WYŁĄCZONY (Kliknij, aby włączyć)")
+        self.btn_autosave = QPushButton("⚪ ZBIERANIE ZDJĘĆ: WYŁĄCZONE (Włącz)")
+        self.btn_autosave.setMinimumHeight(30)
         self.btn_autosave.setCheckable(True)
         self.btn_autosave.toggled.connect(self._on_autosave_button_toggled)
         self._update_autosave_button_style(False)
@@ -170,18 +222,19 @@ class BatchPanel(QWidget):
         # Alias dla kompatybilności wstecznej
         self.chk_autosave = self.btn_autosave
 
-        # Wybór warunku auto-zapisu
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Warunek auto-zapisu:"))
+        mode_row.setSpacing(6)
+        mode_row.addWidget(QLabel("Warunek:"))
         self.combo_autosave_mode = QComboBox()
+        self.combo_autosave_mode.setMinimumHeight(26)
         self.combo_autosave_mode.addItem("Każda skanowana klatka (co interwał)", "interval")
         self.combo_autosave_mode.addItem("Tylko gdy wykryto kod kreskowy", "detection_only")
         self.combo_autosave_mode.currentIndexChanged.connect(self._on_autosave_mode_combo_changed)
         mode_row.addWidget(self.combo_autosave_mode, stretch=1)
         snap_layout.addLayout(mode_row)
 
-        # Pasek statusu zapisanych zdjęć
         self.lbl_capture_status = QLabel("Zapisano w sesji: 0 szt. | Ostatni zapis: brak")
+        self.lbl_capture_status.setWordWrap(True)
         self.lbl_capture_status.setStyleSheet(
             "background-color: #1a1a1a; color: #cccccc; font-size: 11px; "
             "padding: 4px 6px; border-radius: 4px; border: 1px solid #333333;"
@@ -195,15 +248,39 @@ class BatchPanel(QWidget):
         # ==========================================
         log_group = QGroupBox("Historia Ostatnich Odczytów (Live Log)")
         log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(8, 8, 8, 6)
+        log_layout.setSpacing(5)
+
+        log_header_row = QHBoxLayout()
+        log_header_row.setSpacing(6)
+        self.lbl_log_count = QLabel("Ostatnie odczyty (max 40):")
+        self.lbl_log_count.setStyleSheet("color: #9aa6b2; font-size: 11px;")
+        log_header_row.addWidget(self.lbl_log_count, stretch=1)
+
+        self.btn_clear_log = QPushButton("🗑 Wyczyść Live Log")
+        self.btn_clear_log.setMinimumHeight(26)
+        self.btn_clear_log.setToolTip("Natychmiast kasuje całą historię tabeli Live Log")
+        self.btn_clear_log.setStyleSheet(
+            "QPushButton { background-color: #3b2226; border: 1px solid #99444c; color: #ffd9dc; "
+            "font-weight: bold; font-size: 11px; padding: 3px 10px; }"
+            "QPushButton:hover { background-color: #542c32; border-color: #ff6670; color: #ffffff; }"
+            "QPushButton:pressed { background-color: #2b181b; }"
+        )
+        self.btn_clear_log.clicked.connect(self.clear_log_requested.emit)
+        log_header_row.addWidget(self.btn_clear_log)
+        log_layout.addLayout(log_header_row)
 
         self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Czas", "Odczytany Kod", "Format", "Status", "Czas (ms)"])
+        self.table.setMinimumHeight(130)
+        self.table.setHorizontalHeaderLabels(["Czas", "Odczytany Kod", "Format", "Status", "ms"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setStyleSheet("""
             QTableWidget {
                 background-color: #161616;
@@ -211,12 +288,19 @@ class BatchPanel(QWidget):
                 gridline-color: #333333;
                 font-size: 11px;
             }
+            QHeaderView::section {
+                background-color: #222730;
+                color: #d0d8e0;
+                border: 1px solid #333a45;
+                padding: 4px;
+                font-weight: bold;
+            }
         """)
         self.table.setAlternatingRowColors(True)
-        log_layout.addWidget(self.table)
+        log_layout.addWidget(self.table, stretch=1)
 
-        # Statystyki sesji na dole tabeli
         self.lbl_stats = QLabel("Przeskanowane klatki: 0 | Klatki z kodem: 0 | Łącznie kodów: 0")
+        self.lbl_stats.setWordWrap(True)
         self.lbl_stats.setStyleSheet("color: #aaaaaa; font-size: 11px; font-weight: bold;")
         log_layout.addWidget(self.lbl_stats)
 
@@ -228,16 +312,18 @@ class BatchPanel(QWidget):
 
     def _update_autosave_button_style(self, active: bool) -> None:
         if active:
-            self.btn_autosave.setText("🔴 TRYB ZBIERANIA ZDJĘĆ: AKTYWNY (Kliknij, aby zatrzymać)")
+            self.btn_autosave.setText("🔴 ZBIERANIE ZDJĘĆ: AKTYWNE (Zatrzymaj)")
             self.btn_autosave.setStyleSheet(
-                "background-color: #cc1111; color: #ffffff; font-weight: bold; font-size: 12px; "
-                "padding: 7px; border: 2px solid #ff6666; border-radius: 4px;"
+                "QPushButton { background-color: #cc1111; color: #ffffff; font-weight: bold; font-size: 12px; "
+                "padding: 5px 8px; border: 2px solid #ff6666; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #e01818; }"
             )
         else:
-            self.btn_autosave.setText("⚪ TRYB ZBIERANIA ZDJĘĆ: WYŁĄCZONY (Kliknij, aby włączyć)")
+            self.btn_autosave.setText("⚪ ZBIERANIE ZDJĘĆ: WYŁĄCZONE (Włącz)")
             self.btn_autosave.setStyleSheet(
-                "background-color: #2b2b2b; color: #dddddd; font-weight: bold; font-size: 12px; "
-                "padding: 7px; border: 1px solid #555555; border-radius: 4px;"
+                "QPushButton { background-color: #2b313a; color: #e2e8f0; font-weight: bold; font-size: 12px; "
+                "padding: 5px 8px; border: 1px solid #556070; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #363e4a; border-color: #00bbee; }"
             )
 
     def set_autosave_mode(self, mode: str) -> None:
@@ -255,6 +341,12 @@ class BatchPanel(QWidget):
         short_file = last_file if len(last_file) <= 34 else ("..." + last_file[-31:])
         self.lbl_capture_status.setText(
             f"Zapisano w sesji: {session_count} (W folderze: {total_dir_count}) | Ostatni [{last_time}]: {short_file}"
+        )
+
+    def update_system_summary(self, cpu_pct: float, proc_ram_mb: float, os_threads: int) -> None:
+        """Aktualizuje skrótowy podgląd obciążenia CPU, RAM i wątków w panelu bocznym."""
+        self.lbl_sys_perf.setText(
+            f"CPU: {cpu_pct:.0f}% | RAM proc.: {proc_ram_mb:.0f} MB | Wątki: {os_threads}"
         )
 
     def update_scanner_live_status(self, status_text: str, state: str = "idle") -> None:
@@ -286,7 +378,7 @@ class BatchPanel(QWidget):
         if connected:
             self.lbl_hw_status.setText(f"● Połączono: {name}")
             self.lbl_hw_status.setStyleSheet("font-weight: bold; color: #00ff66;")
-            self.lbl_hw_details.setText(f"Parametry: {usb_speed} | Identyfikator: {mxid}")
+            self.lbl_hw_details.setText(f"Parametry: {usb_speed} | ID: {mxid}")
         else:
             self.lbl_hw_status.setText(f"● Brak sygnału: {name}")
             self.lbl_hw_status.setStyleSheet("font-weight: bold; color: #ff3333;")
@@ -318,13 +410,15 @@ class BatchPanel(QWidget):
     def update_batch_display(self) -> None:
         """Odświeża wyświetlanie wzorca partii, tabeli logów oraz stanu alarmu."""
         if self.batch_manager.baseline_code:
-            self.lbl_batch_code.setText(f"{self.batch_manager.baseline_code} ({self.batch_manager.baseline_format})")
+            fmt = self.batch_manager.baseline_format
+            badge_txt = f"{self.batch_manager.baseline_code} ({fmt})" if fmt else self.batch_manager.baseline_code
+            self.lbl_batch_code.setText(badge_txt)
             self.lbl_batch_code.setStyleSheet("""
                 background-color: #102615;
                 color: #00ff88;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: bold;
-                padding: 8px;
+                padding: 7px;
                 border-radius: 4px;
                 border: 2px solid #00bb55;
             """)
@@ -335,7 +429,7 @@ class BatchPanel(QWidget):
                 color: #ffaa00;
                 font-size: 13px;
                 font-weight: bold;
-                padding: 8px;
+                padding: 7px;
                 border-radius: 4px;
                 border: 1px dashed #ffaa00;
             """)
@@ -354,7 +448,9 @@ class BatchPanel(QWidget):
             f"Kody: {st.total_barcodes_detected} (Zgodne: {st.matched_codes_count}, Inne: {st.mismatched_codes_count})"
         )
 
+        total_hist = len(self.batch_manager.history)
         history = self.batch_manager.history[:40]
+        self.lbl_log_count.setText(f"Wpisy w logu: {total_hist} (widoczne maks. 40):")
         self.table.setRowCount(len(history))
         for row, entry in enumerate(history):
             item_time = QTableWidgetItem(entry.timestamp_str)

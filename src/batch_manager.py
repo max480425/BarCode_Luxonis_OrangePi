@@ -69,6 +69,10 @@ class BatchManager:
         self.mismatch_consecutive_count = 0
         self.candidate_mismatch_code = None
 
+    def clear_history(self) -> None:
+        """Natychmiastowo czyści listę historii ostatnich odczytów (Live Log)."""
+        self.history.clear()
+
     def accept_candidate_as_new_baseline(self) -> None:
         """Zaakceptowanie wykrytego kandydata jako nowej partii bazowej."""
         if self.candidate_mismatch_code:
