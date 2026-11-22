@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -111,11 +112,20 @@ class StorageManager:
             return defaults
 
     def save_config(self, config_data: Dict[str, Any]) -> None:
-        """Zapisuje parametry konfiguracyjne do pliku config.json."""
-        try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=4, ensure_ascii=False)
-            logger.info("Zapisano konfigurację do: %s", self.config_path)
-        except Exception as e:
-            logger.error("Błąd zapisu config.json: %s", e)
+        """Atomowo zapisuje parametry konfiguracyjne do pliku config.json (odporne na restart/utratę zasilania)."""
+        with self._lock:
+            tmp_path = self.config_path.with_name(f".{self.config_path.name}.tmp")
+            try:
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(config_data, f, indent=4, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.config_path)
+                logger.info("Zapisano konfigurację do: %s", self.config_path)
+            except Exception as e:
+                logger.error("Błąd zapisu config.json: %s", e)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass

@@ -353,10 +353,62 @@ def test_usb_disconnect_clears_frame_stops_scanning_and_reconnects():
     print("[OK] Test odpięcia/podpięcia kamery USB (czyszczenie klatki + auto-reconnect + zmiana /dev/videoN) zaliczony!")
 
 
+def test_roi_and_settings_persist_immediately_without_close():
+    """Weryfikuje, że zmiana ROI myszką lub polami X/Y zapisuje config.json od razu (nawet przed restartem bez close)."""
+    app = QApplication.instance() or QApplication(sys.argv)
+    cam = CameraDeviceInfo("opencv", "opencv:0", "Integrated Camera [USB #0]", index=0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tp = Path(tmp)
+        storage = StorageManager(output_dir=tp / "captures", config_path=tp / "data" / "config.json")
+        storage.save_config({
+            "opc_ua_enabled": False,
+            "detection_interval_s": 0.0,
+            "roi": [0.1, 0.2, 0.9, 0.8],
+            "exposure_us": 5000,
+            "auto_exposure": False,
+        })
+
+        with patch("src.gui.main_window.enumerate_cameras", return_value=[cam]), \
+             patch.object(CameraWorker, "start", return_value=None), \
+             patch.object(CameraWorker, "stop", return_value=None):
+            win = MainWindow(storage_manager=storage)
+
+            # 1. Zmiana ROI myszką -> natychmiastowy zapis do config.json bez wywoływania win.close()
+            win.video_widget.roi_changed.emit(0.15, 0.30, 0.75, 0.85)
+            app.processEvents()
+
+            loaded1 = storage.load_config()
+            assert [round(v, 3) for v in loaded1["roi"]] == [0.15, 0.30, 0.75, 0.85], (
+                f"ROI z myszki nie zapisało się od razu w config.json: {loaded1['roi']}"
+            )
+
+            # 2. Zmiana ROI z kontrolek numerycznych + ekspozycji -> zapis po krótkim debounce (<0.5s)
+            win.camera_controls.spin_x1.setValue(25.0)
+            win.camera_controls.set_exposure_us(2000)
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                app.processEvents()
+                loaded2 = storage.load_config()
+                if round(loaded2["roi"][0], 3) == 0.25 and loaded2["exposure_us"] == 2000:
+                    break
+                time.sleep(0.03)
+
+            loaded2 = storage.load_config()
+            assert round(loaded2["roi"][0], 3) == 0.25, f"ROI ze spinboxa nie zapisało się: {loaded2['roi']}"
+            assert loaded2["exposure_us"] == 2000, f"Ekspozycja nie zapisała się: {loaded2['exposure_us']}"
+
+            win.close()
+            app.processEvents()
+
+    print("[OK] Zmiana ROI i parametrów zapisuje się natychmiast do config.json (odporne na twardy restart).")
+
+
 if __name__ == "__main__":
     test_batch_manager_clear_history()
     test_batch_manager_auto_switch_after_10_identical_codes()
     test_system_monitor_metrics()
     test_ui_clear_log_resource_monitor_and_widget_visibility()
     test_usb_disconnect_clears_frame_stops_scanning_and_reconnects()
+    test_roi_and_settings_persist_immediately_without_close()
     print("\n=== WSZYSTKIE NOWE TESTY UI I MONITORA ZASOBÓW ZAKOŃCZONE SUKCESEM! ===")

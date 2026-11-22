@@ -101,6 +101,12 @@ class MainWindow(QMainWindow):
         self.detect_timer = QTimer(self)
         self.detect_timer.timeout.connect(self._on_detection_tick)
 
+        # Timer opóźnionego zapisu konfiguracji (debounce dla suwaków/pól liczbowych)
+        self._config_save_timer = QTimer(self)
+        self._config_save_timer.setSingleShot(True)
+        self._config_save_timer.setInterval(350)
+        self._config_save_timer.timeout.connect(self._save_current_config)
+
         # Timer lekkiej telemetrii systemowej (CPU / RAM / wątki)
         self.sys_mon_timer = QTimer(self)
         self.sys_mon_timer.setInterval(1500)
@@ -525,7 +531,7 @@ class MainWindow(QMainWindow):
         self.camera_controls.camera_source_changed.connect(self._on_camera_source_changed)
         self.camera_controls.refresh_cameras_requested.connect(self._on_refresh_cameras)
         self.camera_controls.exposure_changed.connect(self._on_exposure_changed)
-        self.camera_controls.interval_changed.connect(self._apply_detection_interval)
+        self.camera_controls.interval_changed.connect(self._on_interval_changed)
         self.camera_controls.trigger_detection_requested.connect(self._on_detection_tick)
         self.camera_controls.roi_inputs_changed.connect(self._on_roi_changed_from_inputs)
 
@@ -585,6 +591,7 @@ class MainWindow(QMainWindow):
         self.batch_manager.set_baseline(new_code)
         self.batch_panel.update_batch_display()
         self._sync_opc_batch_state()
+        self._schedule_config_save(immediate=True)
         self.status_bar.showMessage(f"Ignition ustawił nowy kod partii: {new_code}", 4000)
 
     def _sync_opc_batch_state(self) -> None:
@@ -700,6 +707,7 @@ class MainWindow(QMainWindow):
     def _on_roi_changed_from_video(self, x1: float, y1: float, x2: float, y2: float) -> None:
         self.barcode_engine.set_roi(x1, y1, x2, y2)
         self.camera_controls.update_roi_values(x1, y1, x2, y2)
+        self._schedule_config_save(immediate=True)
         self.status_bar.showMessage(
             f"Zaktualizowano ROI: [{x1*100:.1f}%, {y1*100:.1f}%] - [{x2*100:.1f}%, {y2*100:.1f}%]", 3000
         )
@@ -708,15 +716,22 @@ class MainWindow(QMainWindow):
     def _on_roi_changed_from_inputs(self, x1: float, y1: float, x2: float, y2: float) -> None:
         self.barcode_engine.set_roi(x1, y1, x2, y2)
         self.video_widget.set_roi(x1, y1, x2, y2)
+        self._schedule_config_save(immediate=False)
 
     @Slot(int, int, bool)
     def _on_exposure_changed(self, exposure_us: int, iso: int, auto_exp: bool) -> None:
         if self.camera_worker:
             self.camera_worker.update_exposure(exposure_us, iso, auto_exp)
+        self._schedule_config_save(immediate=False)
         if auto_exp:
             self.status_bar.showMessage("Przełączono kamerę na Auto Exposure (zalecane do pracy biurkowej)", 3000)
         else:
             self.status_bar.showMessage(f"Ustawiono ekspozycję manualną: {exposure_us} µs, ISO {iso}", 3000)
+
+    @Slot(float)
+    def _on_interval_changed(self, interval_s: float) -> None:
+        self._apply_detection_interval(interval_s)
+        self._schedule_config_save(immediate=True)
 
     @Slot(float)
     def _apply_detection_interval(self, interval_s: float) -> None:
@@ -898,6 +913,7 @@ class MainWindow(QMainWindow):
         self.batch_manager.reset_baseline()
         self.batch_panel.update_batch_display()
         self._sync_opc_batch_state()
+        self._schedule_config_save(immediate=True)
         self.status_bar.showMessage("Zresetowano wzorzec partii. Auto-Lock oczekuje na kolejny odczytany kod.", 4000)
 
     @Slot()
@@ -905,6 +921,7 @@ class MainWindow(QMainWindow):
         self.batch_manager.accept_candidate_as_new_baseline()
         self.batch_panel.update_batch_display()
         self._sync_opc_batch_state()
+        self._schedule_config_save(immediate=True)
         self.status_bar.showMessage(f"Ustawiono nowy kod wzorcowy partii: {self.batch_manager.baseline_code}", 4000)
 
     @Slot()
@@ -979,6 +996,7 @@ class MainWindow(QMainWindow):
         self._auto_save_active = active
         sess_cnt = self.storage_manager.session_saved_count
         self.video_widget.set_photo_collection_status(self._auto_save_active, self._auto_save_mode, sess_cnt)
+        self._schedule_config_save(immediate=True)
         if active:
             mode_desc = "każda skanowana klatka" if self._auto_save_mode == "interval" else "tylko przy wykryciu kodu"
             self.status_bar.showMessage(f"🔴 WŁĄCZONO Tryb Zbierania Zdjęć ({mode_desc}).", 4000)
@@ -992,18 +1010,21 @@ class MainWindow(QMainWindow):
         self._auto_save_mode = mode
         sess_cnt = self.storage_manager.session_saved_count
         self.video_widget.set_photo_collection_status(self._auto_save_active, self._auto_save_mode, sess_cnt)
+        self._schedule_config_save(immediate=True)
         mode_desc = "każda skanowana klatka (co interwał)" if mode == "interval" else "tylko gdy wykryto kod"
         self.status_bar.showMessage(f"Zmieniono warunek auto-zapisu: {mode_desc}", 3000)
 
     @Slot(int)
     def _on_threshold_changed(self, threshold: int) -> None:
         self.batch_manager.confirmation_threshold = threshold
+        self._schedule_config_save(immediate=False)
         self.status_bar.showMessage(f"Próg potwierdzeń zmiany litografii: {threshold}", 3000)
 
     @Slot(int)
     def _on_auto_switch_threshold_changed(self, threshold: int) -> None:
         self.batch_manager.auto_switch_threshold = threshold
         self.batch_panel.update_batch_display()
+        self._schedule_config_save(immediate=False)
         if threshold <= 0:
             self.status_bar.showMessage("Automatyczna zmiana kodu bazowego wyłączona.", 3000)
         else:
@@ -1011,11 +1032,22 @@ class MainWindow(QMainWindow):
                 f"Automatyczna zmiana kodu bazowego po {threshold} kolejnych identycznych odczytach.", 3500
             )
 
+    def _schedule_config_save(self, immediate: bool = False) -> None:
+        """Zapisuje konfigurację natychmiast lub z krótkim opóźnieniem (debounce)."""
+        if immediate:
+            self._config_save_timer.stop()
+            self._save_current_config()
+        else:
+            self._config_save_timer.start()
+
     def _save_current_config(self) -> None:
         """Zapisuje bieżącą konfigurację roboczą do pliku config.json."""
-        exp_us = self.camera_worker.exposure_us if self.camera_worker else 20000
-        iso = self.camera_worker.iso if self.camera_worker else 100
-        auto_exp = self.camera_worker.auto_exposure if self.camera_worker else True
+        if hasattr(self, "_config_save_timer") and self._config_save_timer.isActive():
+            self._config_save_timer.stop()
+
+        exp_us = int(self.camera_controls.exposure_us)
+        iso = int(self.camera_controls.iso)
+        auto_exp = bool(self.camera_controls.auto_exp)
 
         cfg_to_save = {
             "camera_device_id": self._current_device_info.device_id if self._current_device_info else "",
