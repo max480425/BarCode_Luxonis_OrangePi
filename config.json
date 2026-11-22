@@ -16,7 +16,7 @@
     "auto_switch_threshold": 10,
     "auto_save_on_detection": false,
     "auto_save_mode": "detection_only",
-    "baseline_code": "5701598026926",
+    "baseline_code": "5740700030567",
     "opc_ua_enabled": true,
     "opc_ua_port": 4840
 }

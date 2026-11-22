@@ -62,7 +62,9 @@ Aplikacja zawiera wbudowany serwer **OPC UA** działający w osobnym asynchronic
 #### Wystawione tagi (do odczytu w SCADA / Perspective):
 | Nazwa tagu w OPC UA | Typ danych | Opis |
 | :--- | :--- | :--- |
-| `CurrentCode` | String | Ostatnio odczytany kod kreskowy na puszce |
+| `CurrentCode` | String | Kod kreskowy z ostatnio analizowanej klatki (lub `""`, jeśli brak) |
+| `LastDetectedCode` | String | Ostatni niepusty wykryty kod kreskowy (zachowywany przy pustych klatkach) |
+| `LastDetectedCodeTime` | String | Data i godzina ostatniego wykrycia kodu (`YYYY-MM-DD HH:MM:SS.mmm`) |
 | `Format` | String | Format kodu (np. `EAN_13`, `CODE_128`) |
 | `IsMatch` | Boolean | `True` = kod zgodny z partią, `False` = błąd litografii |
 | `BaselineCode` | String | Aktualny kod wzorcowy partii produkcyjnej |

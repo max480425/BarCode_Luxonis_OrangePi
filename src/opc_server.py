@@ -40,6 +40,8 @@ class OpcUaServerThread(QThread):
 
         # Węzły OPC UA
         self._node_code = None
+        self._node_last_detected_code = None
+        self._node_last_detected_code_time = None
         self._node_format = None
         self._node_is_match = None
         self._node_baseline = None
@@ -98,6 +100,8 @@ class OpcUaServerThread(QThread):
         # 1. TAGI STATUSU I WYNIKÓW DETEKCJI (Read-Only dla Ignition)
         # ---------------------------------------------------------------------
         self._node_code = await obj_scanner.add_variable(idx, "CurrentCode", "", ua.VariantType.String)
+        self._node_last_detected_code = await obj_scanner.add_variable(idx, "LastDetectedCode", "", ua.VariantType.String)
+        self._node_last_detected_code_time = await obj_scanner.add_variable(idx, "LastDetectedCodeTime", "-", ua.VariantType.String)
         self._node_format = await obj_scanner.add_variable(idx, "Format", "", ua.VariantType.String)
         self._node_is_match = await obj_scanner.add_variable(idx, "IsMatch", False, ua.VariantType.Boolean)
         self._node_baseline = await obj_scanner.add_variable(idx, "BaselineCode", "", ua.VariantType.String)
@@ -215,10 +219,16 @@ class OpcUaServerThread(QThread):
 
         self._scan_trigger_counter = (self._scan_trigger_counter + 1) % 4294967295
         ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        code_str = str(code).strip() if code is not None else ""
 
         async def _update():
             try:
                 await self._node_code.write_value(str(code))
+                if code_str:
+                    if self._node_last_detected_code is not None:
+                        await self._node_last_detected_code.write_value(code_str)
+                    if self._node_last_detected_code_time is not None:
+                        await self._node_last_detected_code_time.write_value(ts_now)
                 await self._node_format.write_value(str(format_str))
                 await self._node_is_match.write_value(bool(is_match))
                 await self._node_duration.write_value(float(duration_ms))

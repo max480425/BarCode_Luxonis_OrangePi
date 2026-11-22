@@ -67,6 +67,9 @@ def test_opc_ua_server_full_integration():
             
             # Wyszukujemy węzły
             node_code = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:CurrentCode"])
+            node_last_code = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:LastDetectedCode"])
+            node_last_code_time = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:LastDetectedCodeTime"])
+            node_last_scan_ts = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:LastScanTimestamp"])
             node_match = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:IsMatch"])
             node_alarm = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:BatchAlarm"])
             node_streak = await client.nodes.objects.get_child([f"{ns_idx}:BarcodeScanner", f"{ns_idx}:MismatchStreak"])
@@ -76,7 +79,11 @@ def test_opc_ua_server_full_integration():
 
             # 1. Sprawdzenie początkowej wartości
             val_code = await node_code.read_value()
-            print(f"Odczytano CurrentCode = '{val_code}'")
+            val_last_code = await node_last_code.read_value()
+            val_last_code_time = await node_last_code_time.read_value()
+            assert val_last_code == ""
+            assert val_last_code_time == "-"
+            print(f"Odczytano CurrentCode = '{val_code}', LastDetectedCode = '{val_last_code}'")
 
             # 2. Publikacja wyniku detekcji z aplikacji
             print("Publikacja detekcji kodu z aplikacji do OPC UA...")
@@ -99,10 +106,44 @@ def test_opc_ua_server_full_integration():
             await asyncio.sleep(0.3)
 
             read_code = await node_code.read_value()
+            read_last_code = await node_last_code.read_value()
+            read_last_code_time = await node_last_code_time.read_value()
             read_match = await node_match.read_value()
             assert read_code == "5740700030567", f"Błędny kod w OPC UA: {read_code}"
+            assert read_last_code == "5740700030567", f"Błędny LastDetectedCode: {read_last_code}"
+            assert read_last_code_time != "-" and len(read_last_code_time) >= 19
             assert read_match is True, f"Błędny status IsMatch: {read_match}"
-            print(f"[OK] Klient odczytał zaktualizowany kod: '{read_code}', IsMatch={read_match}")
+            print(f"[OK] Klient odczytał zaktualizowany kod: '{read_code}', LastDetectedCode='{read_last_code}' ({read_last_code_time}), IsMatch={read_match}")
+
+            # 2b. Pusta klatka (brak wykrytego kodu) zeruje CurrentCode, ale NIE nadpisuje LastDetectedCode ani LastDetectedCodeTime
+            await asyncio.sleep(0.05)
+            server.publish_detection(
+                code="",
+                format_str="",
+                is_match=False,
+                duration_ms=12.0
+            )
+            await asyncio.sleep(0.25)
+
+            assert await node_code.read_value() == "", "Pusta klatka powinna ustawić CurrentCode na ''"
+            assert await node_last_code.read_value() == "5740700030567", "LastDetectedCode nie może zniknąć po pustej klatce"
+            assert await node_last_code_time.read_value() == read_last_code_time, "LastDetectedCodeTime nie może się zmienić po pustej klatce"
+            assert await node_last_scan_ts.read_value() != read_last_code_time, "LastScanTimestamp powinien odświeżyć się po pustym skanie"
+            print("[OK] Pusta klatka wyczyściła CurrentCode, zachowując LastDetectedCode i LastDetectedCodeTime.")
+
+            # 2c. Kolejny wykryty kod aktualizuje LastDetectedCode oraz LastDetectedCodeTime
+            await asyncio.sleep(0.05)
+            server.publish_detection(
+                code="5901234567893",
+                format_str="EAN_13",
+                is_match=False,
+                duration_ms=19.4
+            )
+            await asyncio.sleep(0.25)
+            assert await node_code.read_value() == "5901234567893"
+            assert await node_last_code.read_value() == "5901234567893"
+            assert await node_last_code_time.read_value() != read_last_code_time
+            print("[OK] Kolejny odczyt zaktualizował LastDetectedCode i LastDetectedCodeTime.")
 
             # 3. Test Heartbeat (watchdog)
             hb1 = await node_heartbeat.read_value()
