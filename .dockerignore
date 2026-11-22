@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+captures/*.png
+tests_captures
+temp_captures
+temp_test_captures
+data/
+*.log

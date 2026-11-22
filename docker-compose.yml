@@ -1,0 +1,46 @@
+services:
+  barcode-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: barcode-verifier
+    restart: unless-stopped
+    # network_mode: host zapewnia bezproblemowe działanie serwera OPC UA (port 4840) dla Ignition
+    # oraz bezpośredni dostęp do noVNC (port 6080) po IP Orange Pi 5.
+    # Uwaga dla Windows Docker Desktop: jeśli chcesz testować sam kontener (bez kamer USB) lokalnie na Windows,
+    # na Windows host networking nie działa w ten sam sposób — użyj wtedy sekcji `ports:` poniżej.
+    network_mode: host
+    # ports:
+    #   - "4840:4840"
+    #   - "6080:6080"
+
+    # privileged + /dev:/dev pozwala na hot-plug kamer USB UVC (Logitech C922 -> /dev/video*)
+    # oraz re-enumerację USB kamery Luxonis OAK-1 (03e7:2485 -> 03e7:f63b) bez restartu kontenera.
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - ./data:/app/data
+      - ./captures:/app/captures
+
+    # Alternatywa bez privileged (gdy wolisz węższe uprawnienia, bez hot-pluga nowych typów urządzeń):
+    # privileged: false
+    # volumes:
+    #   - /dev/bus/usb:/dev/bus/usb
+    #   - ./data:/app/data
+    #   - ./captures:/app/captures
+    # device_cgroup_rules:
+    #   - 'c 189:* rmw'   # USB (Luxonis OAK)
+    #   - 'c 81:* rmw'    # V4L2 (/dev/video* dla Logitech C922)
+
+    environment:
+      - TZ=Europe/Warsaw
+      - GUI_MODE=novnc
+      - NOVNC_RES=1600x960x24
+      - NOVNC_PORT=6080
+      - VNC_PORT=5900
+      - VNC_PASSWORD=
+      - START_MAXIMIZED=1
+      - CAPTURES_DIR=/app/captures
+      - CONFIG_PATH=/app/data/config.json
+      - OPENBLAS_CORETYPE=ARMV8
+      - QT_X11_NO_MITSHM=1
