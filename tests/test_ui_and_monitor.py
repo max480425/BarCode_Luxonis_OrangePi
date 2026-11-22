@@ -42,6 +42,63 @@ def test_batch_manager_clear_history():
     print("[OK] BatchManager.clear_history() czyści Live Log bez naruszania wzorca partii.")
 
 
+def test_batch_manager_auto_switch_after_10_identical_codes():
+    mgr = BatchManager(confirmation_threshold=5, auto_switch_threshold=10)
+    mgr.set_baseline("5901111111110", "EAN13")
+
+    def _scan(code: str, fmt: str = "CODE128") -> DetectionResult:
+        r = DetectionResult(
+            barcodes=[BarcodeItem(code, fmt, [], [], (0, 0, 20, 20), False)],
+            duration_ms=10.0,
+            timestamp=time.time(),
+        )
+        mgr.process_detection(r)
+        return r
+
+    # 9 kolejnych innych kodów nie powinno jeszcze zmienić bazy
+    for i in range(1, 10):
+        r = _scan("5902222222220", "EAN13")
+        assert mgr.baseline_code == "5901111111110"
+        assert mgr.mismatch_consecutive_count == i
+        assert r.barcodes[0].is_match is False
+        assert mgr.last_auto_switched_code is None
+        if i >= 5:
+            assert mgr.batch_change_alarm is True
+
+    # Przerwanie serii innym kodem resetuje licznik kandydata do 1
+    _scan("5903333333330", "EAN13")
+    assert mgr.baseline_code == "5901111111110"
+    assert mgr.candidate_mismatch_code == "5903333333330"
+    assert mgr.mismatch_consecutive_count == 1
+
+    # 9 razy nowy kod 5904444444440 -> jeszcze nie zmienia, 10. raz -> automatycznie ustawia bazę!
+    for _ in range(9):
+        _scan("5904444444440", "CODE128")
+        assert mgr.baseline_code == "5901111111110"
+
+    r10 = _scan("5904444444440", "CODE128")
+    assert mgr.baseline_code == "5904444444440"
+    assert mgr.baseline_format == "CODE128"
+    assert mgr.batch_change_alarm is False
+    assert mgr.mismatch_consecutive_count == 0
+    assert mgr.candidate_mismatch_code is None
+    assert mgr.last_auto_switched_code == "5904444444440"
+    assert r10.barcodes[0].is_match is True
+
+    # Kolejny skan tego samego kodu jest już zwykłym dopasowaniem
+    r11 = _scan("5904444444440", "CODE128")
+    assert mgr.last_auto_switched_code is None
+    assert r11.barcodes[0].is_match is True
+
+    # Gdy auto_switch_threshold = 0, automatyczna zmiana jest wyłączona
+    mgr.auto_switch_threshold = 0
+    for _ in range(15):
+        _scan("5905555555550", "EAN13")
+    assert mgr.baseline_code == "5904444444440"
+    assert mgr.batch_change_alarm is True
+    print("[OK] BatchManager automatycznie zmienia kod bazowy po 10 takich samych wykrytych kodach.")
+
+
 def test_system_monitor_metrics():
     mon = SystemMonitor(watch_path=".")
     stop_evt = threading.Event()
@@ -140,7 +197,24 @@ def test_ui_clear_log_resource_monitor_and_widget_visibility():
             assert len(win.batch_manager.history) == 0, "Kliknięcie przycisku powinno od razu skasować Live Log"
             assert win.batch_panel.table.rowCount() == 0, "Tabela Live Log powinna być pusta po skasowaniu"
 
-            # 3. Weryfikacja okna monitora zasobów (CPU / RAM / wątki)
+            # 3. Weryfikacja auto-zmiany kodu bazowego w MainWindow po 10 odczytach
+            assert win.batch_panel.spin_auto_switch.value() == 10
+            dummy_img = __import__("numpy").zeros((480, 640, 3), dtype="uint8")
+            for idx in range(10):
+                new_res = DetectionResult(
+                    barcodes=[BarcodeItem("5909998887771", "EAN13", [], [], (0, 0, 20, 20), False)],
+                    duration_ms=14.0,
+                    timestamp=time.time(),
+                    scan_id=idx + 10,
+                )
+                win._on_detection_done(new_res, dummy_img)
+                app.processEvents()
+
+            assert win.batch_manager.baseline_code == "5909998887771"
+            assert "5909998887771" in win.batch_panel.lbl_batch_code.text()
+            assert win.batch_panel.alarm_box.isVisible() is False
+
+            # 4. Weryfikacja okna monitora zasobów (CPU / RAM / wątki)
             win.batch_panel.btn_system_monitor.click()
             app.processEvents()
             assert win.resource_monitor_window is not None
@@ -152,11 +226,12 @@ def test_ui_clear_log_resource_monitor_and_widget_visibility():
             app.processEvents()
             assert win.resource_monitor_window.isVisible() is False
 
-    print("[OK] Test GUI kasowania Live Log, monitora zasobów oraz wymiarów kontrolek zakończony pomyślnie.")
+    print("[OK] Test GUI kasowania Live Log, auto-zmiany bazy (10x), monitora zasobów oraz wymiarów kontrolek zakończony pomyślnie.")
 
 
 if __name__ == "__main__":
     test_batch_manager_clear_history()
+    test_batch_manager_auto_switch_after_10_identical_codes()
     test_system_monitor_metrics()
     test_ui_clear_log_resource_monitor_and_widget_visibility()
     print("\n=== WSZYSTKIE NOWE TESTY UI I MONITORA ZASOBÓW ZAKOŃCZONE SUKCESEM! ===")

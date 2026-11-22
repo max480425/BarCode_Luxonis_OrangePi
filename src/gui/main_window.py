@@ -60,7 +60,10 @@ class MainWindow(QMainWindow):
         # Inicjalizacja modułów logicznych
         initial_roi = tuple(self.config.get("roi", [0.1, 0.2, 0.9, 0.8]))
         self.barcode_engine = BarcodeEngine(roi_normalized=initial_roi)
-        self.batch_manager = BatchManager(confirmation_threshold=self.config.get("confirmation_threshold", 5))
+        self.batch_manager = BatchManager(
+            confirmation_threshold=self.config.get("confirmation_threshold", 5),
+            auto_switch_threshold=self.config.get("auto_switch_threshold", 10),
+        )
 
         if self.config.get("baseline_code"):
             self.batch_manager.set_baseline(self.config.get("baseline_code"))
@@ -525,6 +528,7 @@ class MainWindow(QMainWindow):
         self.batch_panel.auto_save_toggled.connect(self._on_auto_save_toggled)
         self.batch_panel.auto_save_mode_changed.connect(self._on_auto_save_mode_changed)
         self.batch_panel.threshold_changed.connect(self._on_threshold_changed)
+        self.batch_panel.auto_switch_threshold_changed.connect(self._on_auto_switch_threshold_changed)
 
     # =========================================================================
     # OBSŁUGA ZMIANY I ODŚWIEŻANIA KAMERY
@@ -732,7 +736,19 @@ class MainWindow(QMainWindow):
             fmt_str = first_code.format
             txt_str = first_code.text
 
-            if self.batch_manager.batch_change_alarm:
+            if self.batch_manager.last_auto_switched_code:
+                switched = self.batch_manager.last_auto_switched_code
+                scan_msg = (
+                    f"🔄 Nowy kod bazowy (auto po {self.batch_manager.auto_switch_threshold}x): "
+                    f"{switched} [{fmt_str}] ({result.duration_ms:.1f} ms)"
+                )
+                state_str = "found"
+                self.status_bar.showMessage(
+                    f"🔄 Automatycznie ustawiono nowy kod bazowy po {self.batch_manager.auto_switch_threshold} wykryciach: {switched}",
+                    5000,
+                )
+                self._save_current_config()
+            elif self.batch_manager.batch_change_alarm:
                 scan_msg = f"🚨 ALARM! Wykryto niezgodny kod: {txt_str} [{fmt_str}]"
                 state_str = "candidate"
             elif is_match:
@@ -942,6 +958,17 @@ class MainWindow(QMainWindow):
         self.batch_manager.confirmation_threshold = threshold
         self.status_bar.showMessage(f"Próg potwierdzeń zmiany litografii: {threshold}", 3000)
 
+    @Slot(int)
+    def _on_auto_switch_threshold_changed(self, threshold: int) -> None:
+        self.batch_manager.auto_switch_threshold = threshold
+        self.batch_panel.update_batch_display()
+        if threshold <= 0:
+            self.status_bar.showMessage("Automatyczna zmiana kodu bazowego wyłączona.", 3000)
+        else:
+            self.status_bar.showMessage(
+                f"Automatyczna zmiana kodu bazowego po {threshold} kolejnych identycznych odczytach.", 3500
+            )
+
     def _save_current_config(self) -> None:
         """Zapisuje bieżącą konfigurację roboczą do pliku config.json."""
         exp_us = self.camera_worker.exposure_us if self.camera_worker else 20000
@@ -958,6 +985,7 @@ class MainWindow(QMainWindow):
             "auto_exposure": auto_exp,
             "detection_interval_s": self.camera_controls.interval_s,
             "confirmation_threshold": self.batch_manager.confirmation_threshold,
+            "auto_switch_threshold": self.batch_manager.auto_switch_threshold,
             "auto_save_on_detection": self._auto_save_active,
             "auto_save_mode": self._auto_save_mode,
             "baseline_code": self.batch_manager.baseline_code,

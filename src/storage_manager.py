@@ -91,6 +91,7 @@ class StorageManager:
             "auto_exposure": True,
             "detection_interval_s": 1.0,
             "confirmation_threshold": 5,
+            "auto_switch_threshold": 10,
             "auto_save_on_detection": False,
             "auto_save_mode": "interval",  # 'interval' (każda skanowana klatka) lub 'detection_only' (tylko przy kodzie)
             "baseline_code": None

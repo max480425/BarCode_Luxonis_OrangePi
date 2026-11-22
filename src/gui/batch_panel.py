@@ -34,6 +34,7 @@ class BatchPanel(QWidget):
     auto_save_toggled = Signal(bool)
     auto_save_mode_changed = Signal(str)  # 'interval' lub 'detection_only'
     threshold_changed = Signal(int)
+    auto_switch_threshold_changed = Signal(int)
 
     def __init__(self, batch_manager: BatchManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -155,8 +156,8 @@ class BatchPanel(QWidget):
         # ==========================================
         batch_group = QGroupBox("Aktualna Partia (Auto-Lock)")
         batch_layout = QVBoxLayout(batch_group)
-        batch_layout.setContentsMargins(8, 8, 8, 6)
-        batch_layout.setSpacing(6)
+        batch_layout.setContentsMargins(8, 6, 8, 5)
+        batch_layout.setSpacing(5)
 
         self.lbl_batch_code = QLabel("[ BRAK WZORCA — AUTO-LOCK AKTYWNY ]")
         self.lbl_batch_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -165,31 +166,53 @@ class BatchPanel(QWidget):
             color: #ffaa00;
             font-size: 13px;
             font-weight: bold;
-            padding: 7px;
+            padding: 6px;
             border-radius: 4px;
             border: 1px dashed #ffaa00;
         """)
         batch_layout.addWidget(self.lbl_batch_code)
 
-        sub_batch_layout = QHBoxLayout()
-        sub_batch_layout.setSpacing(6)
+        self.lbl_batch_progress = QLabel("")
+        self.lbl_batch_progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_batch_progress.setWordWrap(True)
+        self.lbl_batch_progress.setVisible(False)
+        batch_layout.addWidget(self.lbl_batch_progress)
+
         self.btn_reset_batch = QPushButton("🔄 Resetuj / Ucz nowy kod")
-        self.btn_reset_batch.setMinimumHeight(28)
+        self.btn_reset_batch.setMinimumHeight(26)
         self.btn_reset_batch.setStyleSheet(
-            "QPushButton { background-color: #323842; border: 1px solid #525d6e; color: #f0f4f8; font-weight: bold; padding: 4px 8px; }"
+            "QPushButton { background-color: #323842; border: 1px solid #525d6e; color: #f0f4f8; font-weight: bold; padding: 3px 8px; }"
             "QPushButton:hover { background-color: #3f4754; border-color: #00bbff; }"
         )
         self.btn_reset_batch.clicked.connect(self.reset_baseline_requested.emit)
-        sub_batch_layout.addWidget(self.btn_reset_batch, stretch=1)
+        batch_layout.addWidget(self.btn_reset_batch)
 
-        sub_batch_layout.addWidget(QLabel("Próg (N):"))
+        sub_batch_layout = QHBoxLayout()
+        sub_batch_layout.setSpacing(8)
+
+        sub_batch_layout.addWidget(QLabel("Alarm (N):"))
         self.spin_threshold = QSpinBox()
         self.spin_threshold.setRange(1, 20)
-        self.spin_threshold.setMinimumWidth(62)
-        self.spin_threshold.setMinimumHeight(26)
+        self.spin_threshold.setMinimumWidth(58)
+        self.spin_threshold.setMinimumHeight(25)
+        self.spin_threshold.setToolTip("Liczba kolejnych innych kodów wywołująca alarm zmiany litografii")
         self.spin_threshold.setValue(self.batch_manager.confirmation_threshold)
         self.spin_threshold.valueChanged.connect(self.threshold_changed.emit)
         sub_batch_layout.addWidget(self.spin_threshold)
+
+        sub_batch_layout.addWidget(QLabel("Auto-baza (N):"))
+        self.spin_auto_switch = QSpinBox()
+        self.spin_auto_switch.setRange(0, 100)
+        self.spin_auto_switch.setSpecialValueText("Wył.")
+        self.spin_auto_switch.setMinimumWidth(62)
+        self.spin_auto_switch.setMinimumHeight(25)
+        self.spin_auto_switch.setToolTip(
+            "Po ilu kolejnych wykryciach takiego samego nowego kodu automatycznie ustawić go jako nowy kod bazowy (0 = wyłączone)"
+        )
+        self.spin_auto_switch.setValue(self.batch_manager.auto_switch_threshold)
+        self.spin_auto_switch.valueChanged.connect(self.auto_switch_threshold_changed.emit)
+        sub_batch_layout.addWidget(self.spin_auto_switch)
+        sub_batch_layout.addStretch(1)
 
         batch_layout.addLayout(sub_batch_layout)
         layout.addWidget(batch_group)
@@ -434,13 +457,33 @@ class BatchPanel(QWidget):
                 border: 1px dashed #ffaa00;
             """)
 
+        auto_thr = self.batch_manager.auto_switch_threshold
         if self.batch_manager.batch_change_alarm:
             cand = self.batch_manager.candidate_mismatch_code or "NOWY KOD"
             cnt = self.batch_manager.mismatch_consecutive_count
-            self.lbl_alarm_desc.setText(f"Nowy kod '{cand}' wykryty {cnt}x z rzędu!")
+            auto_hint = f" (auto-baza przy {auto_thr}x)" if auto_thr > 0 else ""
+            self.lbl_alarm_desc.setText(f"Nowy kod '{cand}' wykryty {cnt}x z rzędu{auto_hint}!")
             self.alarm_box.setVisible(True)
         else:
             self.alarm_box.setVisible(False)
+
+        if self.batch_manager.last_auto_switched_code:
+            self.lbl_batch_progress.setText(
+                f"🔄 Auto-zmiana bazy ({auto_thr}/{auto_thr}): {self.batch_manager.last_auto_switched_code}"
+            )
+            self.lbl_batch_progress.setStyleSheet("color: #00ee88; font-size: 11px; font-weight: bold;")
+            self.lbl_batch_progress.setVisible(True)
+        elif self.batch_manager.mismatch_consecutive_count > 0 and self.batch_manager.candidate_mismatch_code:
+            cand = self.batch_manager.candidate_mismatch_code
+            cnt = self.batch_manager.mismatch_consecutive_count
+            if auto_thr > 0:
+                self.lbl_batch_progress.setText(f"Kandydat zmiany bazy: {cand} ({cnt}/{auto_thr})")
+            else:
+                self.lbl_batch_progress.setText(f"Inny kod z rzędu: {cand} ({cnt}x)")
+            self.lbl_batch_progress.setStyleSheet("color: #ffbb44; font-size: 11px; font-weight: bold;")
+            self.lbl_batch_progress.setVisible(True)
+        else:
+            self.lbl_batch_progress.setVisible(False)
 
         st = self.batch_manager.stats
         self.lbl_stats.setText(

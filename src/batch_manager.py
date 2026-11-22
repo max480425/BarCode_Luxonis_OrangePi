@@ -29,19 +29,23 @@ class BatchStatistics:
 class BatchManager:
     """Zarządza kodem wzorcowym partii, weryfikacją zgodności oraz alarmem zmiany litografii."""
 
-    def __init__(self, confirmation_threshold: int = 5):
+    def __init__(self, confirmation_threshold: int = 5, auto_switch_threshold: int = 10):
         """
         :param confirmation_threshold: Liczba wykryć z rzędu nowego kodu przed wywołaniem alarmu (domyślnie 5).
+        :param auto_switch_threshold: Liczba wykryć z rzędu takiego samego nowego kodu, po której
+                                      automatycznie staje się on nowym kodem bazowym (domyślnie 10, 0 = wyłączone).
         """
         self.confirmation_threshold = max(1, confirmation_threshold)
+        self.auto_switch_threshold = max(0, auto_switch_threshold)
         self.baseline_code: Optional[str] = None
         self.baseline_format: Optional[str] = None
-        
+
         # Stan śledzenia zmiany
         self.candidate_mismatch_code: Optional[str] = None
         self.mismatch_consecutive_count: int = 0
         self.batch_change_alarm: bool = False
-        
+        self.last_auto_switched_code: Optional[str] = None
+
         # Statystyki i historia
         self.stats = BatchStatistics()
         self.history: List[LogEntry] = []
@@ -54,6 +58,7 @@ class BatchManager:
         self.candidate_mismatch_code = None
         self.mismatch_consecutive_count = 0
         self.batch_change_alarm = False
+        self.last_auto_switched_code = None
 
     def set_baseline(self, code: str, fmt: str = "") -> None:
         """Ręczne ustawienie kodu wzorcowego partii."""
@@ -62,12 +67,14 @@ class BatchManager:
         self.candidate_mismatch_code = None
         self.mismatch_consecutive_count = 0
         self.batch_change_alarm = False
+        self.last_auto_switched_code = None
 
     def clear_alarm(self) -> None:
         """Potwierdzenie i wygaszenie alarmu zmiany partii przez operatora."""
         self.batch_change_alarm = False
         self.mismatch_consecutive_count = 0
         self.candidate_mismatch_code = None
+        self.last_auto_switched_code = None
 
     def clear_history(self) -> None:
         """Natychmiastowo czyści listę historii ostatnich odczytów (Live Log)."""
@@ -86,6 +93,7 @@ class BatchManager:
         Zwraca True, jeśli wystąpił alarm zmiany litografii.
         """
         self.stats.total_frames_analyzed += 1
+        self.last_auto_switched_code = None
         now_dt = datetime.now()
         ts_str = now_dt.strftime("%H:%M:%S.") + f"{int(now_dt.microsecond / 1000):03d}"
 
@@ -122,19 +130,31 @@ class BatchManager:
                 self.mismatch_consecutive_count = 0
                 self.candidate_mismatch_code = None
             else:
-                item.is_match = False
-                self.stats.mismatched_codes_count += 1
-                
-                # Zliczanie powtórzeń nowego kodu
+                # Zliczanie kolejnych powtórzeń nowego kodu
                 if self.candidate_mismatch_code == code_text:
                     self.mismatch_consecutive_count += 1
                 else:
                     self.candidate_mismatch_code = code_text
                     self.mismatch_consecutive_count = 1
 
-                # Czy osiągnięto próg potwierdzeń N?
-                if self.mismatch_consecutive_count >= self.confirmation_threshold:
-                    self.batch_change_alarm = True
+                # Po osiągnięciu progu auto-zmiany (domyślnie 10 identycznych kodów z rzędu)
+                # nowy kod automatycznie staje się nowym kodem bazowym
+                if self.auto_switch_threshold > 0 and self.mismatch_consecutive_count >= self.auto_switch_threshold:
+                    self.baseline_code = code_text
+                    self.baseline_format = item.format
+                    self.batch_change_alarm = False
+                    self.mismatch_consecutive_count = 0
+                    self.candidate_mismatch_code = None
+                    self.last_auto_switched_code = code_text
+                    item.is_match = True
+                    self.stats.matched_codes_count += 1
+                else:
+                    item.is_match = False
+                    self.stats.mismatched_codes_count += 1
+
+                    # Czy osiągnięto próg potwierdzeń alarmu N?
+                    if self.mismatch_consecutive_count >= self.confirmation_threshold:
+                        self.batch_change_alarm = True
 
             # Dodanie do historii
             self.history.insert(0, LogEntry(
