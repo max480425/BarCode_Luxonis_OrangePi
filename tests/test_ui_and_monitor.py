@@ -229,9 +229,134 @@ def test_ui_clear_log_resource_monitor_and_widget_visibility():
     print("[OK] Test GUI kasowania Live Log, auto-zmiany bazy (10x), monitora zasobów oraz wymiarów kontrolek zakończony pomyślnie.")
 
 
+def test_usb_disconnect_clears_frame_stops_scanning_and_reconnects():
+    """Weryfikuje czyszczenie zamrożonej klatki po odpięciu USB oraz automatyczne ponowne połączenie."""
+    import numpy as np
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # 1. Test automatycznego ponownego połączenia w CameraWorker._run_opencv
+    cam = CameraDeviceInfo("opencv", "opencv:0", "C922 Pro Stream Webcam [USB #0]", index=0)
+    worker = CameraWorker(device_info=cam, auto_exposure=True)
+
+    statuses = []
+    frames_cnt = [0]
+    worker.status_changed.connect(lambda conn, *_: statuses.append(conn))
+    worker.frame_ready.connect(lambda *_: frames_cnt.__setitem__(0, frames_cnt[0] + 1))
+
+    good_frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+    attempt_num = [0]
+
+    class FakeCap:
+        def __init__(self, attempt: int):
+            self.attempt = attempt
+            self.reads = 0
+            self.released = False
+
+        def isOpened(self):
+            return not self.released
+
+        def set(self, *_args):
+            return True
+
+        def get(self, prop):
+            import cv2
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 640.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 480.0
+            return 0.0
+
+        def read(self):
+            self.reads += 1
+            if self.attempt == 1:
+                # 3 dobre klatki, a potem symulacja odpięcia kamery (zwraca False)
+                if self.reads <= 3:
+                    return True, good_frame
+                return False, None
+            # Po ponownym podpięciu dostarcza z powrotem klatki, po 2 zatrzymujemy test
+            if self.reads <= 2:
+                return True, good_frame
+            worker._running = False
+            return True, good_frame
+
+        def release(self):
+            self.released = True
+
+    def fake_video_capture(*_args):
+        attempt_num[0] += 1
+        return FakeCap(attempt_num[0])
+
+    with patch("src.camera_stream.sys.platform", "win32"), \
+         patch("src.camera_stream.cv2.VideoCapture", side_effect=fake_video_capture), \
+         patch.object(worker, "_sleep_interruptible", lambda _s: time.sleep(0.05)):
+        worker._running = True
+        worker._run_opencv()
+
+    app.processEvents()
+    assert attempt_num[0] >= 2, f"CameraWorker powinien podjąć ponowną próbę połączenia, prób={attempt_num[0]}"
+    assert True in statuses and False in statuses, f"Oczekiwano sekwencji True -> False -> True, było: {statuses}"
+    assert statuses.count(True) >= 2, f"Po ponownym podpięciu powinien ponownie wyemitować connected=True: {statuses}"
+    assert frames_cnt[0] >= 4
+
+    # 2. Test zmiany numeru /dev/videoN po hot-plugu na Linuksie
+    cam_linux = CameraDeviceInfo(
+        "opencv", "opencv:2", "C922 Pro Stream Webcam [USB #2]", index=2, device_path="/dev/video2"
+    )
+    worker_linux = CameraWorker(device_info=cam_linux)
+    replugged_list = [
+        CameraDeviceInfo(
+            "opencv", "opencv:4", "C922 Pro Stream Webcam [USB #4]", index=4, device_path="/dev/video4"
+        )
+    ]
+    with patch("src.camera_stream.sys.platform", "linux"), \
+         patch("src.camera_stream._enumerate_linux_v4l2_cameras", return_value=replugged_list):
+        resolved = worker_linux._resolve_opencv_target()
+        assert resolved is not None
+        assert resolved[0] == "/dev/video4" and resolved[1] == 4
+
+    # 3. Test w MainWindow: po odpięciu znika zamrożony kadr i detekcja NIE skanuje starej klatki
+    with tempfile.TemporaryDirectory() as tmp:
+        tp = Path(tmp)
+        storage = StorageManager(output_dir=tp / "captures", config_path=tp / "config.json")
+        storage.save_config({"opc_ua_enabled": False, "detection_interval_s": 0.0})
+        with patch("src.gui.main_window.enumerate_cameras", return_value=[cam]), \
+             patch.object(CameraWorker, "start", return_value=None), \
+             patch.object(CameraWorker, "stop", return_value=None):
+            win = MainWindow(storage_manager=storage)
+            win._on_camera_status_changed(True, cam.name, "USB #0", "640×480")
+            win._on_frame_ready(good_frame, good_frame)
+            assert win._latest_4k_frame is not None
+            assert win.video_widget._image is not None
+            assert win.zoom_widget._image is not None
+
+            # Symulacja odpięcia kamery
+            win._on_camera_status_changed(False, cam.name, "USB #0", "Utracono sygnał")
+            assert win._latest_4k_frame is None, "Po odłączeniu kamery ostatnia klatka musi zostać wyczyszczona"
+            assert win.video_widget._image is None, "Podgląd wideo powinien zostać wyczyszczony"
+            assert win.zoom_widget._image is None, "Podgląd Zoom 1:1 powinien zostać wyczyszczony"
+            assert win._is_detecting is False
+
+            # Wywołanie tyknięcia skanera nie powinno uruchamiać detekcji
+            win._on_detection_tick()
+            assert win._is_detecting is False
+
+            # Ponowne podłączenie kamery przywraca strumień i możliwość skanowania
+            win._on_camera_status_changed(True, cam.name, "USB #0", "640×480")
+            win._on_frame_ready(good_frame, good_frame)
+            assert win._latest_4k_frame is not None
+            assert win.video_widget._image is not None
+
+            win.close()
+            app.processEvents()
+
+    print("[OK] Test odpięcia/podpięcia kamery USB (czyszczenie klatki + auto-reconnect + zmiana /dev/videoN) zaliczony!")
+
+
 if __name__ == "__main__":
     test_batch_manager_clear_history()
     test_batch_manager_auto_switch_after_10_identical_codes()
     test_system_monitor_metrics()
     test_ui_clear_log_resource_monitor_and_widget_visibility()
+    test_usb_disconnect_clears_frame_stops_scanning_and_reconnects()
     print("\n=== WSZYSTKIE NOWE TESTY UI I MONITORA ZASOBÓW ZAKOŃCZONE SUKCESEM! ===")

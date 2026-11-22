@@ -81,6 +81,8 @@ class MainWindow(QMainWindow):
         self._current_fps: float = 0.0
         self._last_resolution_str: str = "-"
         self._last_opc_status_str: str = "Inicjalizacja..."
+        self._camera_connected: bool = False
+        self._camera_disconnected: bool = False
         self._is_detecting: bool = False
         self._is_saving_auto: bool = False
         self._manual_zoom_norm: Optional[Tuple[float, float]] = None
@@ -198,6 +200,15 @@ class MainWindow(QMainWindow):
 
         self._current_device_info = device_info
         self._latest_4k_frame = None
+        self._latest_detection_result = None
+        self._camera_connected = False
+        self._camera_disconnected = False
+        self._current_fps = 0.0
+        self._last_resolution_str = "-"
+        if hasattr(self, "video_widget"):
+            self.video_widget.clear_stream("")
+        if hasattr(self, "zoom_widget"):
+            self.zoom_widget.update_zoom_frame(None)
 
         initial_exp = self.config.get("exposure_us", 20000)
         initial_iso = self.config.get("iso", 100)
@@ -613,6 +624,14 @@ class MainWindow(QMainWindow):
     @Slot(object, object)
     def _on_frame_ready(self, full_frame: np.ndarray, preview_frame: np.ndarray) -> None:
         """Odbiór nowej klatki z kamery (wywoływany w głównym wątku GUI)."""
+        sender = self.sender()
+        if sender is not None and sender is not self.camera_worker:
+            return
+        if sender is self.camera_worker and self._camera_disconnected:
+            return
+
+        self._camera_connected = True
+        self._camera_disconnected = False
         self._latest_4k_frame = full_frame
         h, w = full_frame.shape[:2]
         self._last_resolution_str = f"{w}×{h}"
@@ -641,10 +660,31 @@ class MainWindow(QMainWindow):
 
     @Slot(bool, str, str, str)
     def _on_camera_status_changed(self, connected: bool, name: str, id_or_mxid: str, extra_info: str) -> None:
+        sender = self.sender()
+        if sender is not None and sender is not self.camera_worker:
+            return
+
+        self._camera_connected = bool(connected)
+        self._camera_disconnected = not bool(connected)
         self.batch_panel.update_hardware_status(connected, name, id_or_mxid, extra_info)
+
         if connected:
+            if self._current_device_info and name:
+                self._current_device_info.name = name
+            if self.opc_server and name:
+                self.opc_server.update_camera(name)
             self.status_bar.showMessage(f"Aktywna kamera: {name} ({extra_info}, ID: {id_or_mxid})")
         else:
+            self._latest_4k_frame = None
+            self._latest_detection_result = None
+            self._current_fps = 0.0
+            self._last_resolution_str = "-"
+            self.video_widget.clear_stream(
+                f"⚠ Brak sygnału z kamery: {name}\n({extra_info}) — automatyczne ponowne łączenie..."
+            )
+            self.zoom_widget.update_zoom_frame(None)
+            self.batch_panel.update_performance(0.0, self._last_decode_ms)
+            self.batch_panel.update_scanner_live_status("⏸ Kamera odłączona — wstrzymano skanowanie", "idle")
             self.status_bar.showMessage(f"Brak sygnału z kamery: {name} ({extra_info})")
 
     @Slot(float)
@@ -723,6 +763,8 @@ class MainWindow(QMainWindow):
     def _on_detection_done(self, result: DetectionResult, analyzed_frame: np.ndarray) -> None:
         """Odbiór wyników detekcji w wątku głównym GUI."""
         self._is_detecting = False
+        if self._camera_disconnected:
+            return
         self._latest_detection_result = result
         self._last_decode_ms = result.duration_ms
 

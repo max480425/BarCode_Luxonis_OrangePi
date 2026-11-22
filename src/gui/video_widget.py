@@ -25,6 +25,7 @@ class VideoWidget(QWidget):
         self.setStyleSheet("background-color: #121212; border-radius: 6px;")
 
         self._image: Optional[QImage] = None
+        self._disconnected_msg: str = ""
         self._raw_w = 1280
         self._raw_h = 960
         self._full_w = 4000
@@ -148,8 +149,21 @@ class VideoWidget(QWidget):
             self._anim_timer.stop()
         self.update()
 
+    def clear_stream(self, message: str = "Oczekiwanie na strumień z wybranej kamery...") -> None:
+        """Czyści ostatnią klatkę i wyniki detekcji po odłączeniu kamery."""
+        self._image = None
+        self._barcodes = []
+        self._candidates = []
+        self._is_scanning_now = False
+        self._scan_line_progress = -1.0
+        self._zoom_bounds_4k = None
+        self._disconnected_msg = message
+        self._anim_timer.stop()
+        self.update()
+
     def update_frame(self, frame_bgr: np.ndarray, detection_result: Optional[DetectionResult] = None) -> None:
         """Aktualizacja wyświetlanej klatki wideo."""
+        self._disconnected_msg = ""
         h, w, ch = frame_bgr.shape
         self._raw_w = w
         self._raw_h = h
@@ -258,9 +272,11 @@ class VideoWidget(QWidget):
         if self._image is not None and not self._image.isNull():
             painter.drawImage(target_rect, self._image)
         else:
-            painter.setPen(QColor(150, 150, 150))
+            is_warning = bool(self._disconnected_msg)
+            painter.setPen(QColor(255, 175, 60) if is_warning else QColor(150, 150, 150))
             painter.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Oczekiwanie na strumień z wybranej kamery...")
+            msg = self._disconnected_msg or "Oczekiwanie na strumień z wybranej kamery..."
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, msg)
             return
 
         now_mono = time.monotonic()

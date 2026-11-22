@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import cv2
 import depthai as dai
 import numpy as np
@@ -255,6 +255,20 @@ class CameraWorker(QThread):
         finally:
             self._latest_frame_mutex.unlock()
 
+    def _clear_latest_frame(self) -> None:
+        """Czyści bufor ostatniej klatki po utracie połączenia z kamerą."""
+        self._latest_frame_mutex.lock()
+        try:
+            self._latest_full_frame = None
+        finally:
+            self._latest_frame_mutex.unlock()
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        """Usypia wątek w krótkich krokach, aby stop() przerywał oczekiwanie natychmiast."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while self._running and time.monotonic() < deadline:
+            time.sleep(min(0.1, max(0.01, deadline - time.monotonic())))
+
     def update_exposure(self, exposure_us: int, iso: int, auto_exposure: bool = False) -> None:
         """Asynchroniczne zlecenie aktualizacji parametrów naświetlania kamery."""
         self._mutex.lock()
@@ -310,134 +324,236 @@ class CameraWorker(QThread):
         except Exception as e:
             logger.debug("Sterowanie ekspozycją USB niedostępne w sterowniku: %s", e)
 
+    def _resolve_opencv_target(self) -> Optional[Tuple[object, int, str]]:
+        """
+        Wyznacza aktualny cel otwarcia dla kamery USB (OpenCV).
+        W Linuksie po odpięciu i ponownym wpięciu kamera może otrzymać inny numer /dev/videoN —
+        wtedy odszukujemy ją ponownie po nazwie karty V4L2.
+        """
+        if not sys.platform.startswith("linux"):
+            return (self.device_index, self.device_index, self.device_name)
+
+        base_name = self.device_name.split("[")[0].strip().lower()
+        v4l2_cams = _enumerate_linux_v4l2_cameras()
+
+        # 1. Dokładna ścieżka /dev/videoX o ile zgadza się nazwa urządzenia (lub brak nazwy)
+        wanted_path = self.device_info.device_path or f"/dev/video{self.device_index}"
+        for cam in v4l2_cams:
+            if cam.device_path == wanted_path:
+                cam_base = cam.name.split("[")[0].strip().lower()
+                if not base_name or base_name.startswith("kamera usb") or base_name == cam_base:
+                    return (cam.device_path, cam.index, cam.name)
+
+        # 2. Kamera wróciła pod nowym numerem /dev/videoY po hot-plugu USB
+        if base_name and not base_name.startswith("kamera usb"):
+            for cam in v4l2_cams:
+                cam_base = cam.name.split("[")[0].strip().lower()
+                if base_name == cam_base or base_name in cam_base:
+                    self.device_info.device_path = cam.device_path
+                    self.device_info.index = cam.index
+                    self.device_info.device_id = cam.device_id
+                    self.device_info.name = cam.name
+                    self.device_index = cam.index
+                    self.device_name = cam.name
+                    logger.info(
+                        "Wykryto ponowne podłączenie kamery USB pod nowym węzłem: %s (%s)",
+                        cam.name, cam.device_path
+                    )
+                    return (cam.device_path, cam.index, cam.name)
+            return None
+
+        if os.path.exists(wanted_path):
+            return (wanted_path, self.device_index, self.device_name)
+        return None
+
     def _run_opencv(self) -> None:
         is_linux = sys.platform.startswith("linux")
-        target = (self.device_info.device_path or self.device_index) if is_linux else self.device_index
-        logger.info("Uruchamianie pętli akwizycji OpenCV dla: %s (target=%s)...", self.device_name, target)
+        logger.info("Uruchamianie pętli akwizycji OpenCV (z auto-reconnect) dla: %s...", self.device_name)
 
-        if is_linux:
-            self._cap = cv2.VideoCapture(target, cv2.CAP_V4L2)
-            if not self._cap.isOpened():
-                logger.warning("Nie udało się otworzyć z backendem CAP_V4L2, próba backendu domyślnego...")
-                self._cap = cv2.VideoCapture(target)
-        elif sys.platform == "win32":
-            self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
-            if not self._cap.isOpened():
-                logger.warning("Nie udało się otworzyć z backendem CAP_DSHOW, próba backendu domyślnego...")
-                self._cap = cv2.VideoCapture(self.device_index)
-        else:
-            self._cap = cv2.VideoCapture(self.device_index)
+        while self._running:
+            resolved = self._resolve_opencv_target()
+            if resolved is None:
+                self._clear_latest_frame()
+                self.fps_updated.emit(0.0)
+                self.status_changed.emit(
+                    False,
+                    self.device_name,
+                    f"USB #{self.device_index}",
+                    "Odłączono — oczekiwanie na ponowne podłączenie"
+                )
+                self._sleep_interruptible(1.5)
+                continue
 
-        cap = self._cap
-        if not cap.isOpened():
-            err_msg = f"Nie można otworzyć kamery USB: {self.device_name} ({target})"
-            logger.error(err_msg)
-            self.error_occurred.emit(err_msg)
-            self.status_changed.emit(False, self.device_name, f"USB #{self.device_index}", "Błąd otwarcia")
-            return
+            target, active_idx, active_name = resolved
+            logger.info("Próba otwarcia kamery USB: %s (target=%s)...", active_name, target)
 
-        # Na Linuksie (V4L2) wymuszamy MJPG przed ustawieniem 1080p, inaczej kamery USB 2.0 (np. C922) spadają do 5 FPS w YUYV.
-        if is_linux:
-            try:
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+            if is_linux:
+                self._cap = cv2.VideoCapture(target, cv2.CAP_V4L2)
+                if not self._cap.isOpened():
+                    logger.warning("Nie udało się otworzyć z backendem CAP_V4L2, próba backendu domyślnego...")
+                    self._cap = cv2.VideoCapture(target)
+            elif sys.platform == "win32":
+                self._cap = cv2.VideoCapture(active_idx, cv2.CAP_DSHOW)
+                if not self._cap.isOpened():
+                    logger.warning("Nie udało się otworzyć z backendem CAP_DSHOW, próba backendu domyślnego...")
+                    self._cap = cv2.VideoCapture(active_idx)
+            else:
+                self._cap = cv2.VideoCapture(active_idx)
 
-        # Próba negocjacji Full HD 1080p (1920x1080) - dedykowane dla kamer wysokiej rozdzielczości (np. Logitech C922 Pro, C920).
-        # W przypadku starszych kamer lub kamer zintegrowanych (720p), sterownik automatycznie negocjuje
-        # najwyższy wspierany tryb (np. 1280x720 lub 640x480).
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        if is_linux:
-            try:
-                cap.set(cv2.CAP_PROP_FPS, 30)
-            except Exception:
-                pass
-
-        # Włączenie autofokusu dla kamer USB wspierających tę funkcję (np. Logitech C922 Pro)
-        try:
-            cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-        except Exception:
-            pass
-
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        logger.info("Kamera USB %s połączona. Rozdzielczość robocza: %dx%d", self.device_name, actual_w, actual_h)
-        self.status_changed.emit(True, self.device_name, f"USB #{self.device_index}", f"{actual_w}×{actual_h}")
-
-        # Ustawienie początkowej ekspozycji
-        self._apply_opencv_exposure(cap)
-
-        fps_start = time.monotonic()
-        fps_counter = 0
-        first_frame_seen = False
-
-        try:
-            while self._running and cap.isOpened():
-                # Obsługa żądania zmiany ekspozycji z GUI
-                self._mutex.lock()
-                if self._pending_exposure_update:
-                    self.exposure_us = self._new_exposure_us
-                    self.iso = self._new_iso
-                    self.auto_exposure = self._new_auto_exposure
-                    self._pending_exposure_update = False
-                    self._mutex.unlock()
-                    self._apply_opencv_exposure(cap)
-                else:
-                    self._mutex.unlock()
-
-                ret, full_frame = cap.read()
-                if not ret or full_frame is None:
-                    time.sleep(0.01)
-                    continue
-
-                if not first_frame_seen:
-                    first_frame_seen = True
-                    if is_linux and not self.auto_exposure:
-                        self._apply_opencv_exposure(cap)
-
-                # Zapis do wewnętrznego bufora
-                self._latest_frame_mutex.lock()
-                self._latest_full_frame = full_frame
-                self._latest_frame_mutex.unlock()
-
-                # Skalowanie podglądu z zachowaniem proporcji dla płynnego renderowania UI
-                fh, fw = full_frame.shape[:2]
-                if fw > 1280:
-                    prev_w = 1280
-                    prev_h = int(round(prev_w * (fh / float(fw))))
-                    preview_frame = cv2.resize(full_frame, (prev_w, prev_h), interpolation=cv2.INTER_LINEAR)
-                else:
-                    preview_frame = full_frame.copy()
-
-                # Emisja sygnału klatki
-                self.frame_ready.emit(full_frame, preview_frame)
-
-                # Pomiar FPS
-                fps_counter += 1
-                elapsed = time.monotonic() - fps_start
-                if elapsed >= 1.0:
-                    cur_fps = fps_counter / elapsed
-                    self.fps_updated.emit(cur_fps)
-                    fps_counter = 0
-                    fps_start = time.monotonic()
-
-        except Exception as e:
-            err_msg = f"Błąd strumienia kamery USB: {str(e)}"
-            logger.error(err_msg)
-            self.error_occurred.emit(err_msg)
-            self.status_changed.emit(False, self.device_name, f"USB #{self.device_index}", "Błąd")
-        finally:
-            if self._cap is not None:
+            cap = self._cap
+            if not cap.isOpened():
                 try:
-                    self._cap.release()
+                    cap.release()
                 except Exception:
                     pass
                 self._cap = None
-            logger.info("Kamera USB %s została zwolniona.", self.device_name)
-            self.status_changed.emit(False, self.device_name, f"USB #{self.device_index}", "Odłączono")
+                self._clear_latest_frame()
+                self.fps_updated.emit(0.0)
+                logger.warning("Nie można otworzyć kamery USB: %s (%s) — ponowna próba za 1.5 s.", active_name, target)
+                self.status_changed.emit(False, active_name, f"USB #{active_idx}", "Oczekiwanie na kamerę...")
+                self._sleep_interruptible(1.5)
+                continue
+
+            # Na Linuksie (V4L2) wymuszamy MJPG przed ustawieniem 1080p, inaczej kamery USB 2.0 (np. C922) spadają do 5 FPS w YUYV.
+            if is_linux:
+                try:
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            if is_linux:
+                try:
+                    cap.set(cv2.CAP_PROP_FPS, 30)
+                except Exception:
+                    pass
+
+            try:
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+            except Exception:
+                pass
+
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            # Ustawienie początkowej ekspozycji
+            self._apply_opencv_exposure(cap)
+
+            fps_start = time.monotonic()
+            fps_counter = 0
+            first_frame_seen = False
+            consecutive_failures = 0
+            fail_started_at: Optional[float] = None
+            disconnected_reason = ""
+
+            try:
+                while self._running and cap.isOpened():
+                    # Obsługa żądania zmiany ekspozycji z GUI
+                    self._mutex.lock()
+                    if self._pending_exposure_update:
+                        self.exposure_us = self._new_exposure_us
+                        self.iso = self._new_iso
+                        self.auto_exposure = self._new_auto_exposure
+                        self._pending_exposure_update = False
+                        self._mutex.unlock()
+                        self._apply_opencv_exposure(cap)
+                    else:
+                        self._mutex.unlock()
+
+                    read_t0 = time.monotonic()
+                    ret, full_frame = cap.read()
+                    if not ret or full_frame is None or full_frame.size == 0:
+                        now_fail = time.monotonic()
+                        read_dt = now_fail - read_t0
+                        if fail_started_at is None:
+                            fail_started_at = now_fail
+                        consecutive_failures += 1
+                        fail_elapsed = now_fail - fail_started_at
+
+                        node_missing = (
+                            is_linux
+                            and isinstance(target, str)
+                            and target.startswith("/dev/")
+                            and not os.path.exists(target)
+                        )
+                        lost_after_stream = first_frame_seen and (
+                            consecutive_failures >= 15
+                            or (consecutive_failures >= 3 and fail_elapsed >= 1.2)
+                            or read_dt >= 2.0
+                        )
+                        failed_at_start = (not first_frame_seen) and (
+                            consecutive_failures >= 30 or (consecutive_failures >= 5 and fail_elapsed >= 2.5)
+                        )
+                        if node_missing or lost_after_stream or failed_at_start:
+                            disconnected_reason = "Utracono sygnał / kamera odłączona"
+                            logger.warning(
+                                "Utracono połączenie z kamerą USB %s (%s): failures=%d, elapsed=%.2fs, node_missing=%s",
+                                active_name, target, consecutive_failures, fail_elapsed, node_missing
+                            )
+                            break
+
+                        time.sleep(0.02)
+                        continue
+
+                    consecutive_failures = 0
+                    fail_started_at = None
+
+                    if not first_frame_seen:
+                        first_frame_seen = True
+                        logger.info("Kamera USB %s połączona. Rozdzielczość robocza: %dx%d", active_name, actual_w, actual_h)
+                        self.status_changed.emit(True, active_name, f"USB #{active_idx}", f"{actual_w}×{actual_h}")
+                        if is_linux and not self.auto_exposure:
+                            self._apply_opencv_exposure(cap)
+
+                    # Zapis do wewnętrznego bufora
+                    self._latest_frame_mutex.lock()
+                    self._latest_full_frame = full_frame
+                    self._latest_frame_mutex.unlock()
+
+                    # Skalowanie podglądu z zachowaniem proporcji dla płynnego renderowania UI
+                    fh, fw = full_frame.shape[:2]
+                    if fw > 1280:
+                        prev_w = 1280
+                        prev_h = int(round(prev_w * (fh / float(fw))))
+                        preview_frame = cv2.resize(full_frame, (prev_w, prev_h), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        preview_frame = full_frame.copy()
+
+                    # Emisja sygnału klatki
+                    self.frame_ready.emit(full_frame, preview_frame)
+
+                    # Pomiar FPS
+                    fps_counter += 1
+                    elapsed = time.monotonic() - fps_start
+                    if elapsed >= 1.0:
+                        cur_fps = fps_counter / elapsed
+                        self.fps_updated.emit(cur_fps)
+                        fps_counter = 0
+                        fps_start = time.monotonic()
+
+            except Exception as e:
+                disconnected_reason = f"Błąd strumienia: {str(e)}"
+                logger.error("Błąd strumienia kamery USB %s: %s", active_name, e)
+                self.error_occurred.emit(disconnected_reason)
+            finally:
+                if self._cap is not None:
+                    try:
+                        self._cap.release()
+                    except Exception:
+                        pass
+                    self._cap = None
+                self._clear_latest_frame()
+                self.fps_updated.emit(0.0)
+                status_msg = "Odłączono" if not self._running else (disconnected_reason or "Ponowne łączenie...")
+                logger.info("Kamera USB %s została zwolniona (%s).", active_name, status_msg)
+                self.status_changed.emit(False, active_name, f"USB #{active_idx}", status_msg)
+
+            if self._running:
+                self._sleep_interruptible(1.2)
+
+        logger.info("Wątek akwizycji OpenCV dla %s został zatrzymany.", self.device_name)
 
     # =========================================================================
     # POTOK: LUXONIS OAK (DepthAI v3)
@@ -525,8 +641,13 @@ class CameraWorker(QThread):
                 fps_start = time.monotonic()
                 fps_counter = 0
                 total_frames = 0
+                last_frame_mono = time.monotonic()
 
                 while self._running and pipeline.isRunning():
+                    if device.isClosed():
+                        logger.warning("Urządzenie Luxonis OAK zostało zamknięte/odłączone.")
+                        break
+
                     self._mutex.lock()
                     if self._pending_exposure_update:
                         self.exposure_us = self._new_exposure_us
@@ -540,9 +661,13 @@ class CameraWorker(QThread):
 
                     msg = video_queue.tryGet()
                     if msg is None:
+                        if total_frames > 0 and (time.monotonic() - last_frame_mono) > 5.0:
+                            logger.warning("Timeout strumienia Luxonis OAK (>5 s bez klatki) — restart połączenia...")
+                            break
                         time.sleep(0.005)
                         continue
 
+                    last_frame_mono = time.monotonic()
                     full_frame = msg.getCvFrame()
                     total_frames += 1
 
@@ -590,5 +715,8 @@ class CameraWorker(QThread):
                         pass
                     device = None
                     self._device = None
+                self._clear_latest_frame()
+                self.fps_updated.emit(0.0)
+                self.status_changed.emit(False, self.device_name, "-", "Odłączono")
 
         logger.info("Wątek akwizycji Luxonis został zatrzymany.")
